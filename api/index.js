@@ -24,6 +24,10 @@ const shopify = shopifyApi.shopifyApi({
 // Initialize the Resend client for sending emails
 const resend = new Resend(RESEND_API_KEY);
 
+// --- SPAM PREVENTION ---
+const notifiedVariants = new Set();
+
+
 // Helper function to read the raw body from a request
 async function readRawBody(req) {
   return new Promise((resolve, reject) => {
@@ -33,6 +37,7 @@ async function readRawBody(req) {
     req.on('error', err => reject(err));
   });
 }
+
 
 // This is the main function that runs when the webhook is triggered
 module.exports = async (req, res) => {
@@ -55,12 +60,12 @@ module.exports = async (req, res) => {
     console.log('Webhook verified successfully.');
 
     const payload = JSON.parse(rawBody);
-
+    
     if (!payload || !payload.inventory_item_id) {
         console.log("Payload is likely a test webhook or not an inventory level update. Skipping logic and responding OK.");
         return res.status(200).send('OK (Test webhook received)');
     }
-
+    
     const { inventory_item_id, available } = payload;
 
     // --- 2. GET PRODUCT DETAILS FROM SHOPIFY ---
@@ -101,24 +106,57 @@ module.exports = async (req, res) => {
       },
     });
 
-    // THIS LINE IS NOW CORRECTED with a single dot
     const variant = response.body.data.inventoryItem?.variant;
-
     if (!variant) {
       console.log(`No matching variant found for inventory_item_id: ${inventory_item_id}. Skipping.`);
       return res.status(200).send('OK (No variant found)');
     }
 
     const product = variant.product;
+    console.log(`Processing variant: ${product.title} - ${variant.title}`);
 
-    // --- NEW DIAGNOSTIC STEP ---
-    console.log('--- START SHOPIFY PRODUCT DATA DUMP ---');
-    console.log(JSON.stringify(product, null, 2));
-    console.log('--- END SHOPIFY PRODUCT DATA DUMP ---');
+    // --- 3. CHECK OUR RULES (IS MONITORING ON? IS STOCK LOW?) ---
+    
+    // THE FINAL FIX: This now correctly checks for the lowercase string "true".
+    const isMonitoringEnabled = product.inventoryMonitoringEnabled?.value === 'true';
+    const alertThreshold = parseInt(product.inventoryAlertThreshold?.value, 10);
 
-    // The rest of the logic is paused for this test, we just want the log.
+    if (available > alertThreshold) {
+      notifiedVariants.delete(variant.id);
+      console.log(`Stock for ${variant.sku} is healthy (${available}). Reset notification flag.`);
+    }
 
-    res.status(200).send('OK (Diagnostic complete)');
+    if (isMonitoringEnabled && available <= alertThreshold && !notifiedVariants.has(variant.id)) {
+      console.log(`SUCCESS! ALERT TRIGGERED for ${variant.sku}. Quantity: ${available}, Threshold: ${alertThreshold}.`);
+
+      // --- 4. SEND THE EMAIL ALERT ---
+      await resend.emails.send({
+        from: 'LoamLabs Alerts <alerts@loamlabsusa.com>',
+        to: 'builds@loamlabsusa.com',
+        subject: `LOW STOCK ALERT: ${product.title} (${variant.title})`,
+        html: `
+          <h1>Low Stock Alert</h1>
+          <p>This is an automated alert. The following spoke variant has fallen below its defined threshold.</p>
+          <ul>
+            <li><strong>Product:</strong> ${product.title}</li>
+            <li><strong>Variant / Length:</strong> ${variant.title}</li>
+            <li><strong>SKU:</strong> ${variant.sku}</li>
+            <li><strong>Current Quantity:</strong> <strong>${available}</strong></li>
+            <li><strong>Alert Threshold:</strong> ${alertThreshold}</li>
+          </ul>
+          <p>Please consider reordering soon.</p>
+        `,
+      });
+
+      console.log('Email alert sent successfully.');
+      notifiedVariants.add(variant.id);
+
+    } else {
+      console.log(`No alert sent for ${variant.sku}. Monitoring: ${isMonitoringEnabled}, Available: ${available}, Notified Already: ${notifiedVariants.has(variant.id)}`);
+    }
+
+    // --- 5. SEND A SUCCESS RESPONSE TO SHOPIFY ---
+    res.status(200).send('OK');
 
   } catch (error) {
     console.error('An error occurred:', error.message, error.stack);
