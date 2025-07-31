@@ -2,7 +2,7 @@
 const shopifyApi = require('@shopify/shopify-api');
 require('@shopify/shopify-api/adapters/node');
 const { Resend } = require('resend');
-const crypto = require('crypto');
+const crypto =require('crypto');
 
 // --- CONFIGURATION ---
 const {
@@ -113,31 +113,50 @@ module.exports = async (req, res) => {
     }
 
     const product = variant.product;
-    
-    // --- DIAGNOSTIC LOGGING IS RE-ENABLED ---
-    console.log('--- START SHOPIFY PRODUCT DATA DUMP ---');
-    console.log(JSON.stringify(product, null, 2));
-    console.log('--- END SHOPIFY PRODUCT DATA DUMP ---');
-
-
     console.log(`Processing variant: ${product.title} - ${variant.title}`);
 
     // --- 3. CHECK OUR RULES (IS MONITORING ON? IS STOCK LOW?) ---
+    
     const isMonitoringEnabled = product.inventoryMonitoringEnabled?.value === 'true';
-    const alertThreshold = parseInt(product.inventoryAlertThreshold?.value, 10); // This line is likely failing
 
-    // This block is just for logging the values our code sees.
-    console.log('--- Values as seen by the code ---');
-    console.log(`isMonitoringEnabled: ${isMonitoringEnabled}`);
-    console.log(`alertThreshold: ${alertThreshold}`);
-    console.log(`available: ${available}`);
-    console.log('---------------------------------');
+    // THE FINAL FIX: This code now handles numbers that are accidentally wrapped in brackets.
+    // It extracts all digits from the string, joins them, and then converts to a number.
+    const thresholdString = product.inventoryAlertThreshold?.value || '0';
+    const alertThreshold = parseInt(thresholdString.replace(/\D/g, ''), 10);
+
+
+    if (available > alertThreshold) {
+      notifiedVariants.delete(variant.id);
+      console.log(`Stock for ${variant.sku} is healthy (${available}). Reset notification flag.`);
+    }
 
     if (isMonitoringEnabled && available <= alertThreshold && !notifiedVariants.has(variant.id)) {
-      console.log(`SUCCESS! ALERT TRIGGERED for ${variant.sku}.`);
-      // Email sending is paused during this diagnostic test.
+      console.log(`SUCCESS! ALERT TRIGGERED for ${variant.sku}. Quantity: ${available}, Threshold: ${alertThreshold}.`);
+
+      // --- 4. SEND THE EMAIL ALERT ---
+      await resend.emails.send({
+        from: 'LoamLabs Alerts <alerts@loamlabsusa.com>',
+        to: 'builds@loamlabsusa.com',
+        subject: `LOW STOCK ALERT: ${product.title} (${variant.title})`,
+        html: `
+          <h1>Low Stock Alert</h1>
+          <p>This is an automated alert. The following spoke variant has fallen below its defined threshold.</p>
+          <ul>
+            <li><strong>Product:</strong> ${product.title}</li>
+            <li><strong>Variant / Length:</strong> ${variant.title}</li>
+            <li><strong>SKU:</strong> ${variant.sku}</li>
+            <li><strong>Current Quantity:</strong> <strong>${available}</strong></li>
+            <li><strong>Alert Threshold:</strong> ${alertThreshold}</li>
+          </ul>
+          <p>Please consider reordering soon.</p>
+        `,
+      });
+
+      console.log('Email alert sent successfully.');
+      notifiedVariants.add(variant.id);
+
     } else {
-      console.log(`No alert sent.`);
+      console.log(`No alert sent for ${variant.sku}. Monitoring: ${isMonitoringEnabled}, Available: ${available}, Notified Already: ${notifiedVariants.has(variant.id)}`);
     }
 
     // --- 5. SEND A SUCCESS RESPONSE TO SHOPIFY ---
