@@ -136,7 +136,7 @@ module.exports = async (req, res) => {
       // --- 4. SEND THE EMAIL ALERT ---
       await resend.emails.send({
         from: 'LoamLabs Alerts <alerts@loamlabsusa.com>',
-        to: 'builds@loamlabsusa.com',
+        to: 'info@loamlabsusa.com',
         subject: `LOW STOCK ALERT: ${product.title} (${variant.title})`,
         html: `
           <h1>Low Stock Alert</h1>
