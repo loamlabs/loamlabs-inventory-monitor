@@ -15,7 +15,7 @@ const {
 
 // Initialize the Shopify API client
 const shopify = shopifyApi.shopifyApi({
-  apiSecretKey: 'not-used-for-admin-token', // Not needed for Admin API token auth
+  apiSecretKey: 'not-used-for-admin-token',
   adminApiAccessToken: SHOPIFY_ADMIN_API_TOKEN,
   isCustomStoreApp: true,
   hostName: SHOPIFY_STORE_DOMAIN.replace('https://', ''),
@@ -46,7 +46,7 @@ module.exports = async (req, res) => {
 
   try {
     // --- 1. VERIFY THE REQUEST IS FROM SHOPIFY (CRITICAL SECURITY STEP) ---
-    const rawBody = await readRawBody(req); // Use our new helper function
+    const rawBody = await readRawBody(req);
     const hmac = req.headers['x-shopify-hmac-sha256'];
 
     const generatedHash = crypto
@@ -60,16 +60,18 @@ module.exports = async (req, res) => {
     }
     console.log('Webhook verified successfully.');
 
-    // Now we can safely use the data
+    // --- THIS IS THE NEW, SMARTER CHECK ---
     const payload = JSON.parse(rawBody);
-    const { inventory_item_id, available } = payload;
     
-    if (!inventory_item_id) {
-        console.log("Webhook payload is not an inventory level update. Skipping.");
-        return res.status(200).send('OK (Not an inventory update)');
+    // Handle the dummy "test" payload from Shopify, which won't have the data we need.
+    if (!payload || !payload.inventory_item_id) {
+        console.log("Payload is likely a test webhook or not an inventory level update. Skipping logic and responding OK.");
+        return res.status(200).send('OK (Test webhook received)');
     }
+    
+    const { inventory_item_id, available } = payload;
 
-    // --- 2. GET PRODUCT DETAILS FROM SHOPIFY USING THE INVENTORY ITEM ID ---
+    // --- 2. GET PRODUCT DETAILS FROM SHOPIFY ---
     const graphqlClient = new shopify.clients.Graphql({
       session: {
         id: 'inventory-monitor-session',
@@ -120,13 +122,11 @@ module.exports = async (req, res) => {
     const isMonitoringEnabled = product.inventoryMonitoringEnabled?.value === true;
     const alertThreshold = parseInt(product.inventoryAlertThreshold?.value, 10);
 
-    // If stock is now *above* the threshold, remove it from our spam-prevention list
     if (available > alertThreshold) {
       notifiedVariants.delete(variant.id);
       console.log(`Stock for ${variant.sku} is healthy (${available}). Reset notification flag.`);
     }
 
-    // THE CORE LOGIC: Send an alert if monitoring is on, stock is below threshold, AND we haven't already sent an alert.
     if (isMonitoringEnabled && available <= alertThreshold && !notifiedVariants.has(variant.id)) {
       console.log(`ALERT TRIGGERED for ${variant.sku}. Quantity: ${available}, Threshold: ${alertThreshold}.`);
 
