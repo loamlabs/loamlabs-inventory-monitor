@@ -107,21 +107,25 @@ module.exports = async (req, res) => {
       },
     });
 
-    const variant = response.body.data.inventoryItem?.variant;
+    const variant = response.body..data.inventoryItem?.variant;
     if (!variant) {
       console.log(`No matching variant found for inventory_item_id: ${inventory_item_id}. Skipping.`);
       return res.status(200).send('OK (No variant found)');
     }
 
     const product = variant.product;
+
+    // --- NEW DIAGNOSTIC STEP ---
+    // This will print the exact data object we get from Shopify to the logs.
+    console.log('--- START SHOPIFY PRODUCT DATA DUMP ---');
+    console.log(JSON.stringify(product, null, 2));
+    console.log('--- END SHOPIFY PRODUCT DATA DUMP ---');
+
+
     console.log(`Processing variant: ${product.title} - ${variant.title}`);
 
     // --- 3. CHECK OUR RULES (IS MONITORING ON? IS STOCK LOW?) ---
-
-    // ----- THIS IS THE ONLY LINE THAT HAS CHANGED -----
-    // It now accepts the correct boolean `true` OR the string `"True"` from the buggy text input.
     const isMonitoringEnabled = product.inventoryMonitoringEnabled?.value === true || product.inventoryMonitoringEnabled?.value === 'True';
-    
     const alertThreshold = parseInt(product.inventoryAlertThreshold?.value, 10);
 
     if (available > alertThreshold) {
@@ -131,34 +135,12 @@ module.exports = async (req, res) => {
 
     if (isMonitoringEnabled && available <= alertThreshold && !notifiedVariants.has(variant.id)) {
       console.log(`ALERT TRIGGERED for ${variant.sku}. Quantity: ${available}, Threshold: ${alertThreshold}.`);
-
-      // --- 4. SEND THE EMAIL ALERT ---
-      await resend.emails.send({
-        from: 'LoamLabs Alerts <alerts@loamlabsusa.com>',
-        to: 'builds@loamlabsusa.com',
-        subject: `LOW STOCK ALERT: ${product.title} (${variant.title})`,
-        html: `
-          <h1>Low Stock Alert</h1>
-          <p>This is an automated alert. The following spoke variant has fallen below its defined threshold.</p>
-          <ul>
-            <li><strong>Product:</strong> ${product.title}</li>
-            <li><strong>Variant / Length:</strong> ${variant.title}</li>
-            <li><strong>SKU:</strong> ${variant.sku}</li>
-            <li><strong>Current Quantity:</strong> <strong>${available}</strong></li>
-            <li><strong>Alert Threshold:</strong> ${alertThreshold}</li>
-          </ul>
-          <p>Please consider reordering soon.</p>
-        `,
-      });
-
-      console.log('Email alert sent successfully.');
+      await resend.emails.send({ /* ... email sending logic ... */ }); // Email logic is paused for this test
       notifiedVariants.add(variant.id);
-
     } else {
       console.log(`No alert sent for ${variant.sku}. Monitoring: ${isMonitoringEnabled}, Available: ${available}, Notified Already: ${notifiedVariants.has(variant.id)}`);
     }
 
-    // --- 5. SEND A SUCCESS RESPONSE TO SHOPIFY ---
     res.status(200).send('OK');
 
   } catch (error) {
