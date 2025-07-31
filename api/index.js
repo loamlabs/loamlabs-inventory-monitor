@@ -1,9 +1,8 @@
 // Import the necessary tools (libraries)
 const shopifyApi = require('@shopify/shopify-api');
-require('@shopify/shopify-api/adapters/node');
+require('@shopify/shopify-api/adapters/node'); // This line tells Shopify's library it's running in a Node.js environment
 const { Resend } = require('resend');
 const crypto = require('crypto');
-const { buffer } = require('buffer');
 
 // --- CONFIGURATION ---
 // Get our secret keys from the Vercel Environment Variables
@@ -27,10 +26,18 @@ const shopify = shopifyApi.shopifyApi({
 const resend = new Resend(RESEND_API_KEY);
 
 // --- SPAM PREVENTION ---
-// This Set will keep track of variants we've already notified about in this session.
-// This prevents getting 50 emails if an order for 50 spokes is placed.
-// It will reset automatically when the Vercel function "sleeps" and "wakes up".
 const notifiedVariants = new Set();
+
+
+// Helper function to read the raw body from a request
+async function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => body += chunk.toString());
+    req.on('end', () => resolve(body));
+    req.on('error', err => reject(err));
+  });
+}
 
 
 // This is the main function that runs when the webhook is triggered
@@ -39,21 +46,22 @@ module.exports = async (req, res) => {
 
   try {
     // --- 1. VERIFY THE REQUEST IS FROM SHOPIFY (CRITICAL SECURITY STEP) ---
+    const rawBody = await readRawBody(req); // Use our new helper function
     const hmac = req.headers['x-shopify-hmac-sha256'];
-    const body = await buffer(req); // Get the raw request body
-    const hash = crypto
+
+    const generatedHash = crypto
       .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
-      .update(body, 'utf8', 'hex')
+      .update(rawBody, 'utf-8')
       .digest('base64');
 
-    if (hash !== hmac) {
+    if (generatedHash !== hmac) {
       console.error('Webhook verification failed: Invalid HMAC signature.');
       return res.status(401).send('Unauthorized');
     }
     console.log('Webhook verified successfully.');
 
-    // Convert the raw body back to JSON to get the data
-    const payload = JSON.parse(body.toString());
+    // Now we can safely use the data
+    const payload = JSON.parse(rawBody);
     const { inventory_item_id, available } = payload;
     
     if (!inventory_item_id) {
@@ -113,7 +121,6 @@ module.exports = async (req, res) => {
     const alertThreshold = parseInt(product.inventoryAlertThreshold?.value, 10);
 
     // If stock is now *above* the threshold, remove it from our spam-prevention list
-    // so we can be notified again if it drops in the future.
     if (available > alertThreshold) {
       notifiedVariants.delete(variant.id);
       console.log(`Stock for ${variant.sku} is healthy (${available}). Reset notification flag.`);
@@ -125,7 +132,7 @@ module.exports = async (req, res) => {
 
       // --- 4. SEND THE EMAIL ALERT ---
       await resend.emails.send({
-        from: 'LoamLabs Alerts <alerts@loamlabsusa.com>', // Ensure this is a verified domain in Resend
+        from: 'LoamLabs Alerts <alerts@loamlabsusa.com>',
         to: 'builds@loamlabsusa.com',
         subject: `LOW STOCK ALERT: ${product.title} (${variant.title})`,
         html: `
@@ -143,8 +150,6 @@ module.exports = async (req, res) => {
       });
 
       console.log('Email alert sent successfully.');
-      
-      // Add this variant to our spam-prevention list for this session
       notifiedVariants.add(variant.id);
 
     } else {
@@ -155,8 +160,7 @@ module.exports = async (req, res) => {
     res.status(200).send('OK');
 
   } catch (error) {
-    console.error('An error occurred:', error);
-    // Send a server error status so Shopify knows something went wrong
+    console.error('An error occurred:', error.message, error.stack);
     res.status(500).send('An internal error occurred.');
   }
 };
