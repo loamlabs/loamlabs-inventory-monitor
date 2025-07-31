@@ -1,11 +1,10 @@
 // Import the necessary tools (libraries)
 const shopifyApi = require('@shopify/shopify-api');
-require('@shopify/shopify-api/adapters/node'); // This line tells Shopify's library it's running in a Node.js environment
+require('@shopify/shopify-api/adapters/node');
 const { Resend } = require('resend');
 const crypto = require('crypto');
 
 // --- CONFIGURATION ---
-// Get our secret keys from the Vercel Environment Variables
 const {
   SHOPIFY_STORE_DOMAIN,
   SHOPIFY_ADMIN_API_TOKEN,
@@ -25,10 +24,6 @@ const shopify = shopifyApi.shopifyApi({
 // Initialize the Resend client for sending emails
 const resend = new Resend(RESEND_API_KEY);
 
-// --- SPAM PREVENTION ---
-const notifiedVariants = new Set();
-
-
 // Helper function to read the raw body from a request
 async function readRawBody(req) {
   return new Promise((resolve, reject) => {
@@ -38,7 +33,6 @@ async function readRawBody(req) {
     req.on('error', err => reject(err));
   });
 }
-
 
 // This is the main function that runs when the webhook is triggered
 module.exports = async (req, res) => {
@@ -61,12 +55,12 @@ module.exports = async (req, res) => {
     console.log('Webhook verified successfully.');
 
     const payload = JSON.parse(rawBody);
-    
+
     if (!payload || !payload.inventory_item_id) {
         console.log("Payload is likely a test webhook or not an inventory level update. Skipping logic and responding OK.");
         return res.status(200).send('OK (Test webhook received)');
     }
-    
+
     const { inventory_item_id, available } = payload;
 
     // --- 2. GET PRODUCT DETAILS FROM SHOPIFY ---
@@ -107,7 +101,9 @@ module.exports = async (req, res) => {
       },
     });
 
-    const variant = response.body..data.inventoryItem?.variant;
+    // THIS LINE IS NOW CORRECTED with a single dot
+    const variant = response.body.data.inventoryItem?.variant;
+
     if (!variant) {
       console.log(`No matching variant found for inventory_item_id: ${inventory_item_id}. Skipping.`);
       return res.status(200).send('OK (No variant found)');
@@ -116,32 +112,13 @@ module.exports = async (req, res) => {
     const product = variant.product;
 
     // --- NEW DIAGNOSTIC STEP ---
-    // This will print the exact data object we get from Shopify to the logs.
     console.log('--- START SHOPIFY PRODUCT DATA DUMP ---');
     console.log(JSON.stringify(product, null, 2));
     console.log('--- END SHOPIFY PRODUCT DATA DUMP ---');
 
+    // The rest of the logic is paused for this test, we just want the log.
 
-    console.log(`Processing variant: ${product.title} - ${variant.title}`);
-
-    // --- 3. CHECK OUR RULES (IS MONITORING ON? IS STOCK LOW?) ---
-    const isMonitoringEnabled = product.inventoryMonitoringEnabled?.value === true || product.inventoryMonitoringEnabled?.value === 'True';
-    const alertThreshold = parseInt(product.inventoryAlertThreshold?.value, 10);
-
-    if (available > alertThreshold) {
-      notifiedVariants.delete(variant.id);
-      console.log(`Stock for ${variant.sku} is healthy (${available}). Reset notification flag.`);
-    }
-
-    if (isMonitoringEnabled && available <= alertThreshold && !notifiedVariants.has(variant.id)) {
-      console.log(`ALERT TRIGGERED for ${variant.sku}. Quantity: ${available}, Threshold: ${alertThreshold}.`);
-      await resend.emails.send({ /* ... email sending logic ... */ }); // Email logic is paused for this test
-      notifiedVariants.add(variant.id);
-    } else {
-      console.log(`No alert sent for ${variant.sku}. Monitoring: ${isMonitoringEnabled}, Available: ${available}, Notified Already: ${notifiedVariants.has(variant.id)}`);
-    }
-
-    res.status(200).send('OK');
+    res.status(200).send('OK (Diagnostic complete)');
 
   } catch (error) {
     console.error('An error occurred:', error.message, error.stack);
