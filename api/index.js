@@ -60,10 +60,8 @@ module.exports = async (req, res) => {
     }
     console.log('Webhook verified successfully.');
 
-    // --- THIS IS THE NEW, SMARTER CHECK ---
     const payload = JSON.parse(rawBody);
     
-    // Handle the dummy "test" payload from Shopify, which won't have the data we need.
     if (!payload || !payload.inventory_item_id) {
         console.log("Payload is likely a test webhook or not an inventory level update. Skipping logic and responding OK.");
         return res.status(200).send('OK (Test webhook received)');
@@ -119,7 +117,11 @@ module.exports = async (req, res) => {
     console.log(`Processing variant: ${product.title} - ${variant.title}`);
 
     // --- 3. CHECK OUR RULES (IS MONITORING ON? IS STOCK LOW?) ---
-    const isMonitoringEnabled = product.inventoryMonitoringEnabled?.value === true;
+
+    // ----- THIS IS THE ONLY LINE THAT HAS CHANGED -----
+    // It now accepts the correct boolean `true` OR the string `"True"` from the buggy text input.
+    const isMonitoringEnabled = product.inventoryMonitoringEnabled?.value === true || product.inventoryMonitoringEnabled?.value === 'True';
+    
     const alertThreshold = parseInt(product.inventoryAlertThreshold?.value, 10);
 
     if (available > alertThreshold) {
