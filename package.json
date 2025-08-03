@@ -1,13 +1,14 @@
 {
   "name": "loamlabs-inventory-monitor",
-  "version": "1.0.0",
-  "description": "Monitors Shopify spoke inventory and sends low-stock alerts.",
+  "version": "2.0.0",
+  "description": "Monitors Shopify spoke inventory and sends cumulative low-stock alerts.",
   "main": "api/index.js",
   "scripts": {
     "start": "node api/index.js"
   },
   "dependencies": {
     "@shopify/shopify-api": "^9.3.2",
+    "@upstash/redis": "^1.31.2",
     "resend": "^3.2.0"
   }
 }
