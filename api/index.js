@@ -57,7 +57,11 @@ module.exports = async (req, res) => {
 
     // 2. Initial Check: Does this order even contain spokes?
     const orderPayload = JSON.parse(rawBody);
-    const containsSpokes = orderPayload.line_items.some(item => item.product_id && (item.vendor === 'Sapim' || item.vendor === 'Berd')); // Adjust vendors if needed
+    
+    // ----- THIS IS THE IMPROVED LOGIC -----
+    // We now check the Product Type for 'Spoke' which is more precise than checking the vendor.
+    const containsSpokes = orderPayload.line_items.some(item => item.product_type === 'Spoke');
+
     if (!containsSpokes) {
         console.log("This order does not contain any spoke products. Exiting.");
         return res.status(200).send('OK (No spokes in order)');
@@ -109,14 +113,12 @@ module.exports = async (req, res) => {
     const previousLowStockSKUs = previousReportJSON ? JSON.parse(previousReportJSON) : [];
     const currentLowStockSKUs = currentLowStockItems.map(item => item.sku).sort();
 
-    // The core intelligence: If the sorted lists are identical, nothing has changed.
     if (JSON.stringify(previousLowStockSKUs.sort()) === JSON.stringify(currentLowStockSKUs)) {
       console.log('The list of low-stock items has not changed since the last report. No new alert needed.');
       return res.status(200).send('OK (No change in low stock list)');
     }
     console.log('List of low-stock items has changed. A new report is required.');
     
-    // If the new list is empty, it means all items were restocked. We clear memory and exit.
     if (currentLowStockItems.length === 0) {
         console.log('All previously low-stock items have been restocked. Clearing memory.');
         await redis.del('last_report_list_json');
