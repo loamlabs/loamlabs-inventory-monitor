@@ -30,65 +30,6 @@ const redis = new Redis({
 });
 
 // --- HELPER FUNCTIONS ---
-async function readRawBody(req) { /* ... (body reading logic) ... */ }
-function getSession() { /* ... (session creation logic) ... */ }
-
-// --- CORE LOGIC FUNCTIONS ---
-
-async function handleOrderCreate(orderPayload) {
-    // Logic for reporting and incrementing historical count
-    console.log("Handling Order Create event...");
-    // ... (All the reporting logic we already built) ...
-    // ... plus new logic to find spokes in this order and increment their counts ...
-}
-
-async function handleOrderCancelled(orderPayload) {
-    // Logic for decrementing historical count
-    console.log("Handling Order Cancelled event...");
-    // ... (New logic to find spokes in the cancelled order and decrement their counts) ...
-}
-
-
-// The main function, which now acts as a router
-module.exports = async (req, res) => {
-  console.log('Webhook received. Starting process...');
-
-  try {
-    // 1. Verify the webhook is from Shopify
-    const rawBody = await readRawBody(req);
-    const hmac = req.headers['x-shopify-hmac-sha256'];
-    const topic = req.headers['x-shopify-topic']; // This tells us which event happened
-    const generatedHash = crypto.createHmac('sha256', SHOPIFY_WEBHOOK_SECRET).update(rawBody, 'utf-8').digest('base64');
-    
-    if (generatedHash !== hmac) {
-      console.error('Webhook verification failed.');
-      return res.status(401).send('Unauthorized');
-    }
-    console.log(`Webhook verified successfully for topic: ${topic}`);
-
-    const orderPayload = JSON.parse(rawBody);
-
-    // 2. Route the request to the correct handler based on the event topic
-    if (topic === 'orders/create') {
-      await handleOrderCreate(orderPayload);
-    } else if (topic === 'orders/cancelled') {
-      await handleOrderCancelled(orderPayload);
-    } else {
-      console.log(`Received unhandled topic: ${topic}. Exiting.`);
-    }
-
-    res.status(200).send('OK');
-
-  } catch (error) {
-    console.error('An error occurred:', error.message, error.stack);
-    res.status(500).send('An internal error occurred.');
-  }
-};
-
-
-// --- IMPLEMENTATION OF HELPER AND CORE LOGIC FUNCTIONS ---
-
-// Re-add the helper functions here
 async function readRawBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
@@ -108,17 +49,58 @@ function getSession() {
     };
 }
 
-// Full implementation of the core logic
+async function updateHistoricalCounts(lineItems, direction) {
+    const client = new shopify.clients.Graphql({ session: getSession() });
+    for (const item of lineItems) {
+        // We only care about variants that have an actual ID and SKU
+        if (!item.variant_id || !item.sku) continue;
+
+        const variantId = `gid://shopify/ProductVariant/${item.variant_id}`;
+        
+        // 1. Get the current count
+        const response = await client.query({
+            data: {
+                query: `query($id: ID!) { productVariant(id: $id) {
+                    historicalOrderCount: metafield(namespace: "custom", key: "historical_order_count") { id value }
+                }}`,
+                variables: { id: variantId }
+            }
+        });
+
+        const metafield = response.body.data.productVariant.historicalOrderCount;
+        const currentCount = metafield ? parseInt(metafield.value, 10) : 0;
+        const newCount = direction === 'increment' 
+            ? currentCount + item.quantity 
+            : Math.max(0, currentCount - item.quantity); // Prevent negative counts
+
+        // 2. Set the new count
+        await client.query({
+            data: {
+                query: `mutation($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { metafields { key value } userErrors { field message } } }`,
+                variables: {
+                    metafields: [{
+                        ownerId: variantId,
+                        namespace: "custom",
+                        key: "historical_order_count",
+                        value: newCount.toString(),
+                        type: "number_integer"
+                    }]
+                }
+            }
+        });
+        console.log(`Updated historical count for SKU ${item.sku} from ${currentCount} to ${newCount}.`);
+    }
+}
+
+
+// --- CORE LOGIC FUNCTIONS ---
 async function handleOrderCreate(orderPayload) {
     console.log("Handling Order Create event...");
 
-    // First, update historical counts for items in this order
-    const spokeLineItems = orderPayload.line_items.filter(item => item.product_id && item.sku && item.sku.startsWith('SPOKE-')); // Assuming SKUs identify spokes
-    if(spokeLineItems.length > 0) {
-        await updateHistoricalCounts(spokeLineItems, 'increment');
-    }
+    // 1. Update historical counts for items in this new order
+    await updateHistoricalCounts(orderPayload.line_items, 'increment');
 
-    // Now, proceed with the low-stock reporting logic
+    // 2. Now, proceed with the low-stock reporting logic
     const allSpokesResponse = await new shopify.clients.Graphql({ session: getSession() }).query({
         data: {
             query: `query { products(first: 250, query: "tag:'component:spoke'") {
@@ -167,9 +149,7 @@ async function handleOrderCreate(orderPayload) {
     }
     
     if (currentLowStockItems.length > 0) {
-        // Build and send email...
         let reportHtml = `<h1>Cumulative Low Stock Report</h1><p>The following spoke products have variants below their defined stock thresholds.</p>`;
-        // ... (email building logic from previous version) ...
         const groupedItems = currentLowStockItems.reduce((acc, item) => {
             const key = `${item.productTitle} (Threshold: ${item.alertThreshold})`;
             if (!acc[key]) acc[key] = [];
@@ -200,48 +180,39 @@ async function handleOrderCreate(orderPayload) {
 
 async function handleOrderCancelled(orderPayload) {
     console.log("Handling Order Cancelled event...");
-    const spokeLineItems = orderPayload.line_items.filter(item => item.product_id && item.sku && item.sku.startsWith('SPOKE-'));
-    if(spokeLineItems.length > 0) {
-        await updateHistoricalCounts(spokeLineItems, 'decrement');
-    }
+    await updateHistoricalCounts(orderPayload.line_items, 'decrement');
 }
 
-async function updateHistoricalCounts(lineItems, direction) {
-    const client = new shopify.clients.Graphql({ session: getSession() });
-    for (const item of lineItems) {
-        const variantId = `gid://shopify/ProductVariant/${item.variant_id}`;
-        
-        // 1. Get the current count
-        const response = await client.query({
-            data: {
-                query: `query($id: ID!) { productVariant(id: $id) {
-                    historicalOrderCount: metafield(namespace: "custom", key: "historical_order_count") { id value }
-                }}`,
-                variables: { id: variantId }
-            }
-        });
 
-        const metafield = response.body.data.productVariant.historicalOrderCount;
-        const currentCount = metafield ? parseInt(metafield.value, 10) : 0;
-        const newCount = direction === 'increment' 
-            ? currentCount + item.quantity 
-            : Math.max(0, currentCount - item.quantity); // Prevent negative counts
-
-        // 2. Set the new count
-        await client.query({
-            data: {
-                query: `mutation($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { metafields { key value } userErrors { field message } } }`,
-                variables: {
-                    metafields: [{
-                        ownerId: variantId,
-                        namespace: "custom",
-                        key: "historical_order_count",
-                        value: newCount.toString(),
-                        type: "number_integer"
-                    }]
-                }
-            }
-        });
-        console.log(`Updated historical count for SKU ${item.sku} from ${currentCount} to ${newCount}.`);
+// The main function, which now acts as a router
+module.exports = async (req, res) => {
+  console.log('Webhook received. Starting process...');
+  try {
+    const rawBody = await readRawBody(req);
+    const hmac = req.headers['x-shopify-hmac-sha256'];
+    const topic = req.headers['x-shopify-topic'];
+    const generatedHash = crypto.createHmac('sha2sha256', SHOPIFY_WEBHOOK_SECRET).update(rawBody, 'utf-8').digest('base64');
+    
+    if (generatedHash !== hmac) {
+      console.error('Webhook verification failed.');
+      return res.status(401).send('Unauthorized');
     }
+    console.log(`Webhook verified successfully for topic: ${topic}`);
+
+    const payload = JSON.parse(rawBody);
+
+    if (topic === 'orders/create') {
+      await handleOrderCreate(payload);
+    } else if (topic === 'orders/cancelled') {
+      await handleOrderCancelled(payload);
+    } else {
+      console.log(`Received unhandled topic: ${topic}. Exiting.`);
+    }
+
+    res.status(200).send('OK');
+
+  } catch (error) {
+    console.error('An error occurred:', error.message, error.stack);
+    res.status(500).send('An internal error occurred.');
+  }
 }
