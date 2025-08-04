@@ -30,49 +30,6 @@ const redis = new Redis({
 });
 
 // --- HELPER FUNCTIONS ---
-async function readRawBody(req) { /* ... */ }
-function getSession() { /* ... */ }
-async function updateHistoricalCounts(lineItems, direction) { /* ... */ }
-
-// --- CORE LOGIC FUNCTIONS ---
-async function handleOrderCreate(orderPayload) { /* ... */ }
-async function handleOrderCancelled(orderPayload) { /* ... */ }
-
-// The main function, which now acts as a router
-module.exports = async (req, res) => {
-  console.log('Webhook received. Starting process...');
-  try {
-    const rawBody = await readRawBody(req);
-    const hmac = req.headers['x-shopify-hmac-sha256'];
-    const topic = req.headers['x-shopify-topic'];
-    const generatedHash = crypto.createHmac('sha256', SHOPIFY_WEBHOOK_SECRET).update(rawBody, 'utf-8').digest('base64');
-    
-    if (generatedHash !== hmac) {
-      console.error('Webhook verification failed.');
-      return res.status(401).send('Unauthorized');
-    }
-    console.log(`Webhook verified successfully for topic: ${topic}`);
-
-    const payload = JSON.parse(rawBody);
-
-    if (topic === 'orders/create') {
-      await handleOrderCreate(payload);
-    } else if (topic === 'orders/cancelled') {
-      await handleOrderCancelled(payload);
-    } else {
-      console.log(`Received unhandled topic: ${topic}. Exiting.`);
-    }
-
-    res.status(200).send('OK');
-
-  } catch (error) {
-    console.error('An error occurred:', error.message, error.stack);
-    res.status(500).send('An internal error occurred.');
-  }
-};
-
-// --- IMPLEMENTATION OF HELPER AND CORE LOGIC FUNCTIONS ---
-
 async function readRawBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
@@ -125,6 +82,7 @@ async function updateHistoricalCounts(lineItems, direction) {
     }
 }
 
+// --- CORE LOGIC FUNCTIONS ---
 async function handleOrderCreate(orderPayload) {
     console.log("Handling Order Create event...");
     await updateHistoricalCounts(orderPayload.line_items, 'increment');
@@ -154,6 +112,10 @@ async function handleOrderCreate(orderPayload) {
       const thresholdString = product.inventoryAlertThreshold?.value || '0';
       const alertThreshold = parseInt(thresholdString.replace(/\D/g, ''), 10);
       for (const { node: variant } of product.variants.edges) {
+        // ----- THIS IS THE NEW LINE OF LOGIC -----
+        // If the variant title is just "-", skip it.
+        if (variant.title === '-') continue;
+
         if (variant.inventoryQuantity < alertThreshold) {
           currentLowStockItems.push({
             productTitle: product.title, alertThreshold: alertThreshold, variantTitle: variant.title,
@@ -164,7 +126,6 @@ async function handleOrderCreate(orderPayload) {
       }
     }
     
-    // --- THE SAFETY NET FIX ---
     const previousReportJSON = await redis.get('last_report_list_json');
     let previousLowStockSKUs = [];
     try {
@@ -175,7 +136,6 @@ async function handleOrderCreate(orderPayload) {
         console.warn("Could not parse previous report from Redis, it might be malformed. Starting fresh.");
         previousLowStockSKUs = [];
     }
-    // --- END FIX ---
     
     const currentLowStockSKUs = currentLowStockItems.map(item => item.sku).sort();
 
@@ -218,3 +178,36 @@ async function handleOrderCancelled(orderPayload) {
     console.log("Handling Order Cancelled event...");
     await updateHistoricalCounts(orderPayload.line_items, 'decrement');
 }
+
+// The main function, which now acts as a router
+module.exports = async (req, res) => {
+  console.log('Webhook received. Starting process...');
+  try {
+    const rawBody = await readRawBody(req);
+    const hmac = req.headers['x-shopify-hmac-sha256'];
+    const topic = req.headers['x-shopify-topic'];
+    const generatedHash = crypto.createHmac('sha256', SHOPIFY_WEBHOOK_SECRET).update(rawBody, 'utf-8').digest('base64');
+    
+    if (generatedHash !== hmac) {
+      console.error('Webhook verification failed.');
+      return res.status(401).send('Unauthorized');
+    }
+    console.log(`Webhook verified successfully for topic: ${topic}`);
+
+    const payload = JSON.parse(rawBody);
+
+    if (topic === 'orders/create') {
+      await handleOrderCreate(payload);
+    } else if (topic === 'orders/cancelled') {
+      await handleOrderCancelled(payload);
+    } else {
+      console.log(`Received unhandled topic: ${topic}. Exiting.`);
+    }
+
+    res.status(200).send('OK');
+
+  } catch (error) {
+    console.error('An error occurred:', error.message, error.stack);
+    res.status(500).send('An internal error occurred.');
+  }
+};
