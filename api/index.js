@@ -58,9 +58,9 @@ module.exports = async (req, res) => {
     // 2. Perform a FULL scan to get the CURRENT state of all low-stock spokes
     console.log("Proceeding with full inventory scan for products tagged 'component:spoke'.");
 
-    // ----- THIS IS THE IMPROVED LOGIC BASED ON YOUR SUGGESTION -----
-    // The query now uses the much more specific 'component:spoke' tag.
-    const allSpokesResponse = await shopify.clients.Graphql({ session: getSession() }).query({
+    // ----- THIS IS THE CORRECTED LINE -----
+    // The "new" keyword has been added before shopify.clients.Graphql
+    const allSpokesResponse = await new shopify.clients.Graphql({ session: getSession() }).query({
         data: {
             query: `query { products(first: 250, query: "tag:'component:spoke'") {
                 edges { node {
