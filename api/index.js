@@ -52,12 +52,10 @@ function getSession() {
 async function updateHistoricalCounts(lineItems, direction) {
     const client = new shopify.clients.Graphql({ session: getSession() });
     for (const item of lineItems) {
-        // We only care about variants that have an actual ID and SKU
         if (!item.variant_id || !item.sku) continue;
 
         const variantId = `gid://shopify/ProductVariant/${item.variant_id}`;
         
-        // 1. Get the current count
         const response = await client.query({
             data: {
                 query: `query($id: ID!) { productVariant(id: $id) {
@@ -71,9 +69,8 @@ async function updateHistoricalCounts(lineItems, direction) {
         const currentCount = metafield ? parseInt(metafield.value, 10) : 0;
         const newCount = direction === 'increment' 
             ? currentCount + item.quantity 
-            : Math.max(0, currentCount - item.quantity); // Prevent negative counts
+            : Math.max(0, currentCount - item.quantity);
 
-        // 2. Set the new count
         await client.query({
             data: {
                 query: `mutation($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { metafields { key value } userErrors { field message } } }`,
@@ -92,15 +89,11 @@ async function updateHistoricalCounts(lineItems, direction) {
     }
 }
 
-
 // --- CORE LOGIC FUNCTIONS ---
 async function handleOrderCreate(orderPayload) {
     console.log("Handling Order Create event...");
-
-    // 1. Update historical counts for items in this new order
     await updateHistoricalCounts(orderPayload.line_items, 'increment');
-
-    // 2. Now, proceed with the low-stock reporting logic
+    
     const allSpokesResponse = await new shopify.clients.Graphql({ session: getSession() }).query({
         data: {
             query: `query { products(first: 250, query: "tag:'component:spoke'") {
@@ -183,7 +176,6 @@ async function handleOrderCancelled(orderPayload) {
     await updateHistoricalCounts(orderPayload.line_items, 'decrement');
 }
 
-
 // The main function, which now acts as a router
 module.exports = async (req, res) => {
   console.log('Webhook received. Starting process...');
@@ -191,7 +183,10 @@ module.exports = async (req, res) => {
     const rawBody = await readRawBody(req);
     const hmac = req.headers['x-shopify-hmac-sha256'];
     const topic = req.headers['x-shopify-topic'];
-    const generatedHash = crypto.createHmac('sha2sha256', SHOPIFY_WEBHOOK_SECRET).update(rawBody, 'utf-8').digest('base64');
+    
+    // ----- THIS IS THE CORRECTED LINE -----
+    // The typo 'sha2sha256' has been corrected to 'sha256'
+    const generatedHash = crypto.createHmac('sha256', SHOPIFY_WEBHOOK_SECRET).update(rawBody, 'utf-8').digest('base64');
     
     if (generatedHash !== hmac) {
       console.error('Webhook verification failed.');
@@ -215,4 +210,4 @@ module.exports = async (req, res) => {
     console.error('An error occurred:', error.message, error.stack);
     res.status(500).send('An internal error occurred.');
   }
-}
+};
