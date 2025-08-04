@@ -184,8 +184,6 @@ module.exports = async (req, res) => {
     const hmac = req.headers['x-shopify-hmac-sha256'];
     const topic = req.headers['x-shopify-topic'];
     
-    // ----- THIS IS THE CORRECTED LINE -----
-    // The typo 'sha2sha256' has been corrected to 'sha256'
     const generatedHash = crypto.createHmac('sha256', SHOPIFY_WEBHOOK_SECRET).update(rawBody, 'utf-8').digest('base64');
     
     if (generatedHash !== hmac) {
