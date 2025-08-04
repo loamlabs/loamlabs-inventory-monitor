@@ -112,9 +112,9 @@ async function handleOrderCreate(orderPayload) {
       const thresholdString = product.inventoryAlertThreshold?.value || '0';
       const alertThreshold = parseInt(thresholdString.replace(/\D/g, ''), 10);
       for (const { node: variant } of product.variants.edges) {
-        // ----- THIS IS THE NEW LINE OF LOGIC -----
-        // If the variant title is just "-", skip it.
-        if (variant.title === '-') continue;
+        // ----- THIS IS THE FINAL, CORRECTED LOGIC -----
+        // It now correctly checks if the title ENDS WITH " / -", which handles all color combinations.
+        if (variant.title.endsWith(' / -')) continue;
 
         if (variant.inventoryQuantity < alertThreshold) {
           currentLowStockItems.push({
@@ -168,6 +168,9 @@ async function handleOrderCreate(orderPayload) {
             html: reportHtml,
         });
         console.log(`Cumulative report sent successfully.`);
+    } else {
+        // This case handles when all items are restocked.
+        console.log('All previously low-stock items have been restocked. Clearing memory and not sending an email.');
     }
 
     await redis.set('last_report_list_json', JSON.stringify(currentLowStockSKUs));
