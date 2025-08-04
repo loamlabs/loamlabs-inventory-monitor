@@ -29,117 +29,53 @@ const redis = new Redis({
   token: UPSTASH_REDIS_REST_TOKEN,
 });
 
-// Helper to read the request body
-async function readRawBody(req) {
-  return new Promise((resolve, reject) => {
-    let body = '';
-    req.on('data', chunk => body += chunk.toString());
-    req.on('end', () => resolve(body));
-    req.on('error', err => reject(err));
-  });
+// --- HELPER FUNCTIONS ---
+async function readRawBody(req) { /* ... (body reading logic) ... */ }
+function getSession() { /* ... (session creation logic) ... */ }
+
+// --- CORE LOGIC FUNCTIONS ---
+
+async function handleOrderCreate(orderPayload) {
+    // Logic for reporting and incrementing historical count
+    console.log("Handling Order Create event...");
+    // ... (All the reporting logic we already built) ...
+    // ... plus new logic to find spokes in this order and increment their counts ...
 }
 
-// The main function, triggered by 'orders/create'
+async function handleOrderCancelled(orderPayload) {
+    // Logic for decrementing historical count
+    console.log("Handling Order Cancelled event...");
+    // ... (New logic to find spokes in the cancelled order and decrement their counts) ...
+}
+
+
+// The main function, which now acts as a router
 module.exports = async (req, res) => {
-  console.log('Order creation webhook received. Starting process...');
+  console.log('Webhook received. Starting process...');
 
   try {
     // 1. Verify the webhook is from Shopify
     const rawBody = await readRawBody(req);
     const hmac = req.headers['x-shopify-hmac-sha256'];
+    const topic = req.headers['x-shopify-topic']; // This tells us which event happened
     const generatedHash = crypto.createHmac('sha256', SHOPIFY_WEBHOOK_SECRET).update(rawBody, 'utf-8').digest('base64');
-
+    
     if (generatedHash !== hmac) {
       console.error('Webhook verification failed.');
       return res.status(401).send('Unauthorized');
     }
-    console.log('Webhook verified successfully.');
-    
-    // 2. Perform a FULL scan to get the CURRENT state of all low-stock spokes
-    console.log("Proceeding with full inventory scan for products tagged 'component:spoke'.");
+    console.log(`Webhook verified successfully for topic: ${topic}`);
 
-    // ----- THIS IS THE CORRECTED LINE -----
-    // The "new" keyword has been added before shopify.clients.Graphql
-    const allSpokesResponse = await new shopify.clients.Graphql({ session: getSession() }).query({
-        data: {
-            query: `query { products(first: 250, query: "tag:'component:spoke'") {
-                edges { node {
-                    title
-                    inventoryAlertThreshold: metafield(namespace: "custom", key: "inventory_alert_threshold") { value }
-                    inventoryMonitoringEnabled: metafield(namespace: "custom", key: "inventory_monitoring_enabled") { value }
-                    variants(first: 100) { edges { node {
-                        title inventoryQuantity sku
-                    }}}
-                }}
-            }}`
-        }
-    });
+    const orderPayload = JSON.parse(rawBody);
 
-    const currentLowStockItems = [];
-    const allSpokeProducts = allSpokesResponse.body.data.products.edges;
-
-    if (!allSpokeProducts || allSpokeProducts.length === 0) {
-        console.log("Scan complete. No products found with the tag 'component:spoke'. Exiting.");
-        return res.status(200).send("OK (No products with 'component:spoke' tag)");
+    // 2. Route the request to the correct handler based on the event topic
+    if (topic === 'orders/create') {
+      await handleOrderCreate(orderPayload);
+    } else if (topic === 'orders/cancelled') {
+      await handleOrderCancelled(orderPayload);
+    } else {
+      console.log(`Received unhandled topic: ${topic}. Exiting.`);
     }
-
-    for (const { node: product } of allSpokeProducts) {
-      const isMonitoringEnabled = product.inventoryMonitoringEnabled?.value === 'true';
-      if (!isMonitoringEnabled) continue;
-
-      const thresholdString = product.inventoryAlertThreshold?.value || '0';
-      const alertThreshold = parseInt(thresholdString.replace(/\D/g, ''), 10);
-
-      for (const { node: variant } of product.variants.edges) {
-        if (variant.inventoryQuantity < alertThreshold) {
-          currentLowStockItems.push({
-            productTitle: product.title,
-            variantTitle: variant.title,
-            sku: variant.sku,
-            quantity: variant.inventoryQuantity,
-            threshold: alertThreshold,
-          });
-        }
-      }
-    }
-    console.log(`Scan complete. Found ${currentLowStockItems.length} items currently below threshold.`);
-
-    // 3. Compare CURRENT list with PREVIOUS list from memory
-    const previousReportJSON = await redis.get('last_report_list_json');
-    const previousLowStockSKUs = previousReportJSON ? JSON.parse(previousReportJSON) : [];
-    const currentLowStockSKUs = currentLowStockItems.map(item => item.sku).sort();
-
-    if (JSON.stringify(previousLowStockSKUs.sort()) === JSON.stringify(currentLowStockSKUs)) {
-      console.log('The list of low-stock items has not changed since the last report. No new alert needed.');
-      return res.status(200).send('OK (No change in low stock list)');
-    }
-    console.log('List of low-stock items has changed. A new report is required.');
-    
-    if (currentLowStockItems.length === 0) {
-        console.log('All previously low-stock items have been restocked. Clearing memory.');
-        await redis.del('last_report_list_json');
-        return res.status(200).send('OK (All items restocked)');
-    }
-
-    // 4. Build and Send the new, updated report
-    let reportHtml = `<h1>Cumulative Low Stock Report</h1><p>The following spoke variants are currently below their defined stock thresholds.</p><ul>`;
-    for (const item of currentLowStockItems) {
-      reportHtml += `<li><strong>${item.productTitle} - ${item.variantTitle}</strong><ul><li>SKU: ${item.sku || 'N/A'}</li><li>Current Quantity: ${item.quantity}</li><li>Alert Threshold: ${item.threshold}</li></ul></li>`;
-    }
-    reportHtml += `</ul><p>Please consider reordering soon.</p>`;
-    
-    await resend.emails.send({
-        from: 'LoamLabs Alerts <info@loamlabsusa.com>',
-        to: 'info@loamlabsusa.com',
-        subject: `CUMULATIVE Low Stock Report (${currentLowStockItems.length} items)`,
-        html: reportHtml,
-    });
-    console.log(`Cumulative report sent successfully with ${currentLowStockItems.length} items.`);
-
-    // 5. Update the "memory" with the new list for the next comparison
-    await redis.set('last_report_list_json', JSON.stringify(currentLowStockSKUs));
-    console.log('Updated low-stock list in database memory.');
-
 
     res.status(200).send('OK');
 
@@ -149,13 +85,163 @@ module.exports = async (req, res) => {
   }
 };
 
-// Helper function to create a Shopify session on the fly
+
+// --- IMPLEMENTATION OF HELPER AND CORE LOGIC FUNCTIONS ---
+
+// Re-add the helper functions here
+async function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => body += chunk.toString());
+    req.on('end', () => resolve(body));
+    req.on('error', err => reject(err));
+  });
+}
+
 function getSession() {
     return {
-        id: 'cumulative-inventory-session',
+        id: 'inventory-management-session',
         shop: SHOPIFY_STORE_DOMAIN,
         accessToken: SHOPIFY_ADMIN_API_TOKEN,
         state: 'not-used',
         isOnline: false,
     };
+}
+
+// Full implementation of the core logic
+async function handleOrderCreate(orderPayload) {
+    console.log("Handling Order Create event...");
+
+    // First, update historical counts for items in this order
+    const spokeLineItems = orderPayload.line_items.filter(item => item.product_id && item.sku && item.sku.startsWith('SPOKE-')); // Assuming SKUs identify spokes
+    if(spokeLineItems.length > 0) {
+        await updateHistoricalCounts(spokeLineItems, 'increment');
+    }
+
+    // Now, proceed with the low-stock reporting logic
+    const allSpokesResponse = await new shopify.clients.Graphql({ session: getSession() }).query({
+        data: {
+            query: `query { products(first: 250, query: "tag:'component:spoke'") {
+                edges { node {
+                    title
+                    inventoryAlertThreshold: metafield(namespace: "custom", key: "inventory_alert_threshold") { value }
+                    inventoryMonitoringEnabled: metafield(namespace: "custom", key: "inventory_monitoring_enabled") { value }
+                    variants(first: 100) { edges { node {
+                        id title inventoryQuantity sku
+                        historicalOrderCount: metafield(namespace: "custom", key: "historical_order_count") { value }
+                    }}}
+                }}
+            }}`
+        }
+    });
+
+    const currentLowStockItems = [];
+    const allSpokeProducts = allSpokesResponse.body.data.products.edges;
+
+    for (const { node: product } of allSpokeProducts) {
+      const isMonitoringEnabled = product.inventoryMonitoringEnabled?.value === 'true';
+      if (!isMonitoringEnabled) continue;
+      const thresholdString = product.inventoryAlertThreshold?.value || '0';
+      const alertThreshold = parseInt(thresholdString.replace(/\D/g, ''), 10);
+      for (const { node: variant } of product.variants.edges) {
+        if (variant.inventoryQuantity < alertThreshold) {
+          currentLowStockItems.push({
+            productTitle: product.title,
+            alertThreshold: alertThreshold,
+            variantTitle: variant.title,
+            sku: variant.sku,
+            quantity: variant.inventoryQuantity,
+            historicalCount: parseInt(variant.historicalOrderCount?.value, 10) || 0,
+          });
+        }
+      }
+    }
+    
+    const previousReportJSON = await redis.get('last_report_list_json');
+    const previousLowStockSKUs = previousReportJSON ? JSON.parse(previousReportJSON) : [];
+    const currentLowStockSKUs = currentLowStockItems.map(item => item.sku).sort();
+
+    if (JSON.stringify(previousLowStockSKUs.sort()) === JSON.stringify(currentLowStockSKUs)) {
+      console.log('Low-stock list unchanged. No new report needed.');
+      return;
+    }
+    
+    if (currentLowStockItems.length > 0) {
+        // Build and send email...
+        let reportHtml = `<h1>Cumulative Low Stock Report</h1><p>The following spoke products have variants below their defined stock thresholds.</p>`;
+        // ... (email building logic from previous version) ...
+        const groupedItems = currentLowStockItems.reduce((acc, item) => {
+            const key = `${item.productTitle} (Threshold: ${item.alertThreshold})`;
+            if (!acc[key]) acc[key] = [];
+            acc[key].push(item);
+            return acc;
+        }, {});
+        for (const groupName in groupedItems) {
+            reportHtml += `<hr><h3>${groupName}</h3><ul>`;
+            for (const item of groupedItems[groupName]) {
+                reportHtml += `<li><strong>${item.variantTitle}</strong><br>SKU: ${item.sku || 'N/A'}<br>Current Quantity: ${item.quantity}<br>Historical Sales Count: ${item.historicalCount}</li>`;
+            }
+            reportHtml += `</ul>`;
+        }
+        reportHtml += `<hr><p>Please consider reordering soon.</p>`;
+        
+        await resend.emails.send({
+            from: 'LoamLabs Alerts <info@loamlabsusa.com>',
+            to: 'info@loamlabsusa.com',
+            subject: `CUMULATIVE Low Stock Report (${currentLowStockItems.length} variants)`,
+            html: reportHtml,
+        });
+        console.log(`Cumulative report sent successfully.`);
+    }
+
+    await redis.set('last_report_list_json', JSON.stringify(currentLowStockSKUs));
+    console.log('Updated low-stock list in database memory.');
+}
+
+async function handleOrderCancelled(orderPayload) {
+    console.log("Handling Order Cancelled event...");
+    const spokeLineItems = orderPayload.line_items.filter(item => item.product_id && item.sku && item.sku.startsWith('SPOKE-'));
+    if(spokeLineItems.length > 0) {
+        await updateHistoricalCounts(spokeLineItems, 'decrement');
+    }
+}
+
+async function updateHistoricalCounts(lineItems, direction) {
+    const client = new shopify.clients.Graphql({ session: getSession() });
+    for (const item of lineItems) {
+        const variantId = `gid://shopify/ProductVariant/${item.variant_id}`;
+        
+        // 1. Get the current count
+        const response = await client.query({
+            data: {
+                query: `query($id: ID!) { productVariant(id: $id) {
+                    historicalOrderCount: metafield(namespace: "custom", key: "historical_order_count") { id value }
+                }}`,
+                variables: { id: variantId }
+            }
+        });
+
+        const metafield = response.body.data.productVariant.historicalOrderCount;
+        const currentCount = metafield ? parseInt(metafield.value, 10) : 0;
+        const newCount = direction === 'increment' 
+            ? currentCount + item.quantity 
+            : Math.max(0, currentCount - item.quantity); // Prevent negative counts
+
+        // 2. Set the new count
+        await client.query({
+            data: {
+                query: `mutation($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { metafields { key value } userErrors { field message } } }`,
+                variables: {
+                    metafields: [{
+                        ownerId: variantId,
+                        namespace: "custom",
+                        key: "historical_order_count",
+                        value: newCount.toString(),
+                        type: "number_integer"
+                    }]
+                }
+            }
+        });
+        console.log(`Updated historical count for SKU ${item.sku} from ${currentCount} to ${newCount}.`);
+    }
 }
