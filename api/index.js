@@ -198,6 +198,29 @@ async function handleOrderCancelled(orderPayload) {
 
 // The main function, which now acts as a router
 module.exports = async (req, res) => {
+  // --- MANUAL TEST TRIGGER ---
+  // This allows you to test by visiting the URL with a secret key.
+  // Example: https://your-vercel-url.vercel.app/api/index?test_mode=true&secret=YOUR_SECRET_KEY
+  try {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    if (url.searchParams.get('test_mode') === 'true') {
+      if (url.searchParams.get('secret') === process.env.MANUAL_TEST_SECRET) {
+        console.log('MANUAL TEST TRIGGERED. Running inventory check...');
+        // We pass an empty payload because the function fetches fresh data from Shopify anyway.
+        await handleOrderCreate({ line_items: [] }); 
+        console.log('Manual test completed successfully.');
+        return res.status(200).send('Manual test triggered and completed successfully. Check logs and email for report.');
+      } else {
+        console.warn('Manual test trigger attempted with invalid secret.');
+        return res.status(401).send('Invalid secret for test mode.');
+      }
+    }
+  } catch (e) {
+      // This will ignore errors if the URL is not what we expect, and proceed to webhook logic
+  }
+  // --- END MANUAL TEST TRIGGER ---
+
+
   console.log('Webhook received. Starting process...');
   try {
     const rawBody = await readRawBody(req);
