@@ -87,15 +87,17 @@ async function handleOrderCreate(orderPayload) {
     console.log("Handling Order Create event...");
     await updateHistoricalCounts(orderPayload.line_items, 'increment');
     
+    // 1. UPDATED GRAPHQL QUERY:
+    // The query now fetches 'inventory_alert_threshold' from each VARIANT, not the product.
     const allSpokesResponse = await new shopify.clients.Graphql({ session: getSession() }).query({
         data: {
             query: `query { products(first: 250, query: "tag:'component:spoke'") {
                 edges { node {
                     title
-                    inventoryAlertThreshold: metafield(namespace: "custom", key: "inventory_alert_threshold") { value }
                     inventoryMonitoringEnabled: metafield(namespace: "custom", key: "inventory_monitoring_enabled") { value }
                     variants(first: 100) { edges { node {
                         id title inventoryQuantity sku
+                        inventoryAlertThreshold: metafield(namespace: "custom", key: "inventory_alert_threshold") { value }
                         historicalOrderCount: metafield(namespace: "custom", key: "historical_order_count") { value }
                     }}}
                 }}
@@ -107,19 +109,29 @@ async function handleOrderCreate(orderPayload) {
     const allSpokeProducts = allSpokesResponse.body.data.products.edges;
 
     for (const { node: product } of allSpokeProducts) {
+      // Product-level monitoring check remains the same
       const isMonitoringEnabled = product.inventoryMonitoringEnabled?.value === 'true';
       if (!isMonitoringEnabled) continue;
-      const thresholdString = product.inventoryAlertThreshold?.value || '0';
-      const alertThreshold = parseInt(thresholdString.replace(/\D/g, ''), 10);
+
       for (const { node: variant } of product.variants.edges) {
-        // ----- THIS IS THE FINAL, CORRECTED LOGIC -----
-        // It now correctly checks if the title ENDS WITH " / -", which handles all color combinations.
         if (variant.title.endsWith(' / -')) continue;
+
+        // 2. UPDATED THRESHOLD LOGIC:
+        // It now reads the threshold from the VARIANT's metafield.
+        // If a variant doesn't have the metafield, it defaults to 0 and will likely not be reported.
+        const thresholdString = variant.inventoryAlertThreshold?.value || '0';
+        const alertThreshold = parseInt(thresholdString, 10);
+        
+        // We add a check to only include variants that have a specific threshold set.
+        if (alertThreshold <= 0) continue;
 
         if (variant.inventoryQuantity < alertThreshold) {
           currentLowStockItems.push({
-            productTitle: product.title, alertThreshold: alertThreshold, variantTitle: variant.title,
-            sku: variant.sku, quantity: variant.inventoryQuantity,
+            productTitle: product.title, 
+            alertThreshold: alertThreshold, // This is now the variant-specific threshold
+            variantTitle: variant.title,
+            sku: variant.sku, 
+            quantity: variant.inventoryQuantity,
             historicalCount: parseInt(variant.historicalOrderCount?.value, 10) || 0,
           });
         }
@@ -145,17 +157,20 @@ async function handleOrderCreate(orderPayload) {
     }
     
     if (currentLowStockItems.length > 0) {
+        // 3. UPDATED REPORTING LOGIC:
+        // The report grouping is simplified, and the specific threshold is shown for each variant.
         let reportHtml = `<h1>Cumulative Low Stock Report</h1><p>The following spoke products have variants below their defined stock thresholds.</p>`;
         const groupedItems = currentLowStockItems.reduce((acc, item) => {
-            const key = `${item.productTitle} (Threshold: ${item.alertThreshold})`;
+            const key = item.productTitle; // Group by product title only
             if (!acc[key]) acc[key] = [];
             acc[key].push(item);
             return acc;
         }, {});
+
         for (const groupName in groupedItems) {
             reportHtml += `<hr><h3>${groupName}</h3><ul>`;
             for (const item of groupedItems[groupName]) {
-                reportHtml += `<li><strong>${item.variantTitle}</strong><br>SKU: ${item.sku || 'N/A'}<br>Current Quantity: ${item.quantity}<br>Historical Sales Count: ${item.historicalCount}</li>`;
+                reportHtml += `<li><strong>${item.variantTitle}</strong><br>SKU: ${item.sku || 'N/A'}<br>Current Quantity: ${item.quantity} (Alert Threshold: ${item.alertThreshold})<br>Historical Sales Count: ${item.historicalCount}</li>`;
             }
             reportHtml += `</ul>`;
         }
@@ -169,7 +184,6 @@ async function handleOrderCreate(orderPayload) {
         });
         console.log(`Cumulative report sent successfully.`);
     } else {
-        // This case handles when all items are restocked.
         console.log('All previously low-stock items have been restocked. Clearing memory and not sending an email.');
     }
 
