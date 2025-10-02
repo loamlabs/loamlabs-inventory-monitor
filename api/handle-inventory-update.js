@@ -2,6 +2,22 @@ import { Redis } from '@upstash/redis';
 import { Resend } from 'resend';
 import { createHmac } from 'crypto';
 
+// This config tells Vercel to NOT parse the request body, giving us the raw stream.
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
+
+// Helper function to read the raw body from the request stream
+async function buffer(readable) {
+  const chunks = [];
+  for await (const chunk of readable) {
+    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
@@ -27,11 +43,14 @@ const getVariantDataByInventoryItemId = async (inventoryItemId) => {
   `;
   const variables = { id: `gid://shopify/InventoryItem/${inventoryItemId}` };
 
-  const response = await fetch(`https://loamlabs.myshopify.com/admin/api/2024-04/graphql.json`, {
+  // Using your environment variable for the store domain
+  const shopifyDomain = process.env.SHOPIFY_STORE_DOMAIN || 'loamlabs.myshopify.com';
+
+  const response = await fetch(`https://${shopifyDomain}/admin/api/2024-04/graphql.json`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_API_ACCESS_TOKEN,
+      'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_API_TOKEN, // Corrected variable name from your screenshot
     },
     body: JSON.stringify({ query, variables }),
   });
@@ -41,9 +60,12 @@ const getVariantDataByInventoryItemId = async (inventoryItemId) => {
 };
 
 export default async function handler(req, res) {
-  // 1. Verify the webhook signature
+  let rawBody;
   try {
-    const rawBody = await req.text();
+    // 1. Verify the webhook signature using the raw body
+    const buf = await buffer(req);
+    rawBody = buf.toString('utf8');
+    
     const hmac = req.headers['x-shopify-hmac-sha256'];
     const hash = createHmac('sha256', process.env.SHOPIFY_WEBHOOK_SECRET)
       .update(rawBody, 'utf8')
@@ -53,21 +75,21 @@ export default async function handler(req, res) {
       console.warn('Webhook verification failed.');
       return res.status(401).send('Unauthorized');
     }
-    req.body = JSON.parse(rawBody);
   } catch (error) {
     console.error('Error verifying webhook:', error);
     return res.status(400).send('Invalid webhook payload');
   }
 
-  // 2. Process the inventory update
-  const { inventory_item_id, available } = req.body;
-
-  // We only care if the item is now IN STOCK
-  if (!available || available <= 0) {
-    return res.status(200).json({ message: 'No action needed for out-of-stock item.' });
-  }
-
   try {
+    // Now that we've verified, we can parse the JSON
+    const body = JSON.parse(rawBody);
+    const { inventory_item_id, available } = body;
+
+    // We only care if the item is now IN STOCK
+    if (!available || available <= 0) {
+      return res.status(200).json({ message: 'No action needed for out-of-stock item.' });
+    }
+
     // 3. Get the variant info from the inventory_item_id
     const variant = await getVariantDataByInventoryItemId(inventory_item_id);
     if (!variant) {
