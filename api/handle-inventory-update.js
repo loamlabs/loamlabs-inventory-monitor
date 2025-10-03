@@ -27,20 +27,26 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 
 const getVariantDataByInventoryItemId = async (inventoryItemId) => {
   const query = `
-    query getVariantByInventoryItem($id: ID!) {
-      inventoryItem(id: $id) {
-        variant {
-          id
+  query getVariantByInventoryItem($id: ID!) {
+    inventoryItem(id: $id) {
+      variant {
+        id
+        title
+        url 
+        image { 
+          url(transform: {maxWidth: 200, maxHeight: 200, crop: CENTER})
+        }
+        product {
           title
-          product {
-            title
-            handle
-            onlineStoreUrl
+          handle
+          featuredImage { 
+             url(transform: {maxWidth: 200, maxHeight: 200, crop: CENTER})
           }
         }
       }
     }
-  `;
+  }
+`;
   const variables = { id: `gid://shopify/InventoryItem/${inventoryItemId}` };
 
   const shopifyDomain = process.env.SHOPIFY_STORE_DOMAIN || 'loamlabs.myshopify.com';
