@@ -24,19 +24,21 @@ const redis = new Redis({
 const resend = new Resend(process.env.RESEND_API_KEY);
 
 const getVariantDataByInventoryItemId = async (inventoryItemId) => {
+  // --- START: CORRECTED GRAPHQL QUERY ---
+  // The invalid 'url' field has been removed.
   const query = `
     query getVariantByInventoryItem($id: ID!) {
       inventoryItem(id: $id) {
         variant {
           id
           title
-          url
           image {
             url(transform: {maxWidth: 200, maxHeight: 200, crop: CENTER})
           }
           product {
             title
             handle
+            onlineStoreUrl # This is the correct way to get the base product URL
             featuredImage {
                url(transform: {maxWidth: 200, maxHeight: 200, crop: CENTER})
             }
@@ -45,8 +47,9 @@ const getVariantDataByInventoryItemId = async (inventoryItemId) => {
       }
     }
   `;
-  const variables = { id: `gid://shopify/InventoryItem/${inventoryItemId}` };
+  // --- END: CORRECTED GRAPHQL QUERY ---
 
+  const variables = { id: `gid://shopify/InventoryItem/${inventoryItemId}` };
   const shopifyDomain = process.env.SHOPIFY_STORE_DOMAIN || 'loamlabs.myshopify.com';
 
   const response = await fetch(`https://${shopifyDomain}/admin/api/2024-04/graphql.json`, {
@@ -60,17 +63,15 @@ const getVariantDataByInventoryItemId = async (inventoryItemId) => {
 
   const jsonResponse = await response.json();
 
-  // --- START: Enhanced Logging ---
   if (jsonResponse.errors) {
     console.error('Shopify GraphQL API returned errors:', JSON.stringify(jsonResponse.errors, null, 2));
   }
-  // --- END: Enhanced Logging ---
   
   return jsonResponse.data?.inventoryItem?.variant;
 };
 
 export default async function handler(req, res) {
-  // Webhook verification logic remains the same...
+  // Webhook verification logic remains unchanged...
   let rawBody;
   try {
     const buf = await buffer(req);
@@ -78,22 +79,16 @@ export default async function handler(req, res) {
     const hmac = req.headers['x-shopify-hmac-sha256'];
     const hash = createHmac('sha256', process.env.SHOPIFY_WEBHOOK_SECRET).update(rawBody, 'utf8').digest('base64');
     if (hmac !== hash) {
-      console.warn('Webhook verification failed.');
       return res.status(401).send('Unauthorized');
     }
   } catch (error) {
-    console.error('Error verifying webhook:', error);
     return res.status(400).send('Invalid webhook payload');
   }
 
   try {
-    if (!rawBody) {
-        return res.status(200).json({ message: 'Empty body, no action taken.' });
-    }
+    if (!rawBody) { return res.status(200).json({ message: 'Empty body, no action taken.' }); }
     const body = JSON.parse(rawBody);
-    if (!body || !body.inventory_item_id) {
-        return res.status(200).json({ message: 'Payload missing required fields, no action taken.' });
-    }
+    if (!body || !body.inventory_item_id) { return res.status(200).json({ message: 'Payload missing required fields.' }); }
 
     const { inventory_item_id, available } = body;
 
@@ -104,7 +99,7 @@ export default async function handler(req, res) {
     const variant = await getVariantDataByInventoryItemId(inventory_item_id);
 
     if (!variant) {
-      console.log(`No variant found for inventory item ID ${inventory_item_id}. This could be a permissions issue (check for read_products and read_inventory scopes) or the item may not be linked to a variant.`);
+      console.log(`No variant found for inventory item ID ${inventory_item_id}.`);
       return res.status(200).json({ message: 'Variant not found.' });
     }
 
@@ -119,13 +114,40 @@ export default async function handler(req, res) {
 
     const uniqueEmails = [...new Set(emails)];
     
-    // The email sending logic from the previous step is correct and remains here.
     const productTitle = variant.product.title;
     const variantTitle = variant.title;
-    const productUrl = variant.url;
+    // --- START: CORRECTED URL CONSTRUCTION ---
+    const productUrl = `${variant.product.onlineStoreUrl}?variant=${variantId}`;
+    // --- END: CORRECTED URL CONSTRUCTION ---
     const imageUrl = variant.image?.url || variant.product.featuredImage?.url;
 
-    const emailHtmlBody = `<!-- The full HTML from the previous step goes here -->`;
+    const emailHtmlBody = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #333; }
+          .container { max-width: 600px; margin: auto; padding: 20px; border: 1px solid #eee; border-radius: 8px; }
+          .product-box { border: 1px solid #ddd; padding: 20px; text-align: center; border-radius: 5px; margin-top: 20px; }
+          .product-image { max-width: 150px; height: auto; margin-bottom: 20px; }
+          .cta-button { display: inline-block; background-color: #1a1a1a; color: #ffffff; padding: 14px 28px; text-decoration: none; font-weight: bold; border-radius: 5px; margin-top: 20px; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h2>Great News!</h2>
+          <p>The item you requested a notification for is now back in stock.</p>
+          <div class="product-box">
+            ${imageUrl ? `<img src="${imageUrl}" alt="${productTitle}" class="product-image">` : ''}
+            <h3>${productTitle}</h3>
+            <p><strong>Variant:</strong> ${variantTitle}</p>
+            <a href="${productUrl}" class="cta-button">View Product</a>
+          </div>
+          <p style="text-align:center; margin-top:30px; font-size: 14px; color: #777;">Stock is limited. Don't miss out!</p>
+        </div>
+      </body>
+      </html>
+    `;
 
     await resend.emails.send({
       from: 'LoamLabs Support <notify@loamlabsusa.com>',
@@ -136,7 +158,6 @@ export default async function handler(req, res) {
     });
 
     await redis.del(redisKey);
-
     return res.status(200).json({ success: true, message: `Sent ${uniqueEmails.length} notifications.` });
 
   } catch (error) {
