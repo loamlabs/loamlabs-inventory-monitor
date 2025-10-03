@@ -125,18 +125,65 @@ export default async function handler(req, res) {
       return res.status(200).json({ message: `No notification requests for variant ${variantId}.` });
     }
 
-    const uniqueEmails = [...new Set(emails)]; 
-    
-    const emailPromises = uniqueEmails.map(email => 
-      resend.emails.send({
-        from: 'LoamLabs Support <notify@loamlabsusa.com>',
-        to: email,
-        subject: `✅ Back in Stock: ${variant.product.title}`,
-        html: `...`, // Your email HTML here
-      })
-    );
+    const uniqueEmails = [...new Set(emails)];
 
-    await Promise.all(emailPromises);
+// --- START: New Email Logic ---
+const productTitle = variant.product.title;
+const variantTitle = variant.title;
+const productUrl = variant.url; // Use the direct variant URL from our new query
+// Use the variant's own image if it exists, otherwise fall back to the product's image.
+const imageUrl = variant.image?.url || variant.product.featuredImage?.url;
+
+const emailHtmlBody = `
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol"; color: #333; }
+      .container { max-width: 600px; margin: auto; padding: 20px; border: 1px solid #eee; border-radius: 8px; }
+      .product-box { border: 1px solid #ddd; padding: 20px; text-align: center; border-radius: 5px; margin-top: 20px; }
+      .product-image { max-width: 150px; height: auto; margin-bottom: 20px; }
+      .cta-button {
+        display: inline-block;
+        background-color: #1a1a1a;
+        color: #ffffff;
+        padding: 14px 28px;
+        text-decoration: none;
+        font-weight: bold;
+        border-radius: 5px;
+        margin-top: 20px;
+      }
+      h2 { font-size: 24px; }
+      h3 { font-size: 18px; margin: 0; }
+      p { line-height: 1.6; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h2>Great News!</h2>
+      <p>The item you requested a notification for is now back in stock and available for purchase.</p>
+      <div class="product-box">
+        ${imageUrl ? `<img src="${imageUrl}" alt="${productTitle}" class="product-image">` : ''}
+        <h3>${productTitle}</h3>
+        <p><strong>Variant:</strong> ${variantTitle}</p>
+        <a href="${productUrl}" class="cta-button">View Product & Order</a>
+      </div>
+      <p style="text-align:center; margin-top:30px; font-size: 14px; color: #777;">Stock is often limited. Don't miss out!</p>
+    </div>
+  </body>
+  </html>
+`;
+
+// Resend allows sending to a list of recipients in a single API call, which is more efficient.
+await resend.emails.send({
+  from: 'LoamLabs Support <notify@loamlabsusa.com>',
+  to: uniqueEmails,
+  subject: `✅ It's Back! ${productTitle} is in stock`,
+  html: emailHtmlBody,
+  // A simple text fallback for older email clients
+  text: `Great news! The item you wanted, ${productTitle} (${variantTitle}), is back in stock. Shop now: ${productUrl}`
+});
+// --- END: New Email Logic ---
     await redis.del(redisKey);
 
     return res.status(200).json({ success: true, message: `Sent ${uniqueEmails.length} notifications.` });
