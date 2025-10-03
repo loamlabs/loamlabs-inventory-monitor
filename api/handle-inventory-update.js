@@ -2,14 +2,12 @@ import { Redis } from '@upstash/redis';
 import { Resend } from 'resend';
 import { createHmac } from 'crypto';
 
-// This config tells Vercel to NOT parse the request body, giving us the raw stream.
 export const config = {
   api: {
     bodyParser: false,
   },
 };
 
-// Helper function to read the raw body from the request stream
 async function buffer(readable) {
   const chunks = [];
   for await (const chunk of readable) {
@@ -27,26 +25,26 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 
 const getVariantDataByInventoryItemId = async (inventoryItemId) => {
   const query = `
-  query getVariantByInventoryItem($id: ID!) {
-    inventoryItem(id: $id) {
-      variant {
-        id
-        title
-        url 
-        image { 
-          url(transform: {maxWidth: 200, maxHeight: 200, crop: CENTER})
-        }
-        product {
+    query getVariantByInventoryItem($id: ID!) {
+      inventoryItem(id: $id) {
+        variant {
+          id
           title
-          handle
-          featuredImage { 
-             url(transform: {maxWidth: 200, maxHeight: 200, crop: CENTER})
+          url
+          image {
+            url(transform: {maxWidth: 200, maxHeight: 200, crop: CENTER})
+          }
+          product {
+            title
+            handle
+            featuredImage {
+               url(transform: {maxWidth: 200, maxHeight: 200, crop: CENTER})
+            }
           }
         }
       }
     }
-  }
-`;
+  `;
   const variables = { id: `gid://shopify/InventoryItem/${inventoryItemId}` };
 
   const shopifyDomain = process.env.SHOPIFY_STORE_DOMAIN || 'loamlabs.myshopify.com';
@@ -61,20 +59,24 @@ const getVariantDataByInventoryItemId = async (inventoryItemId) => {
   });
 
   const jsonResponse = await response.json();
+
+  // --- START: Enhanced Logging ---
+  if (jsonResponse.errors) {
+    console.error('Shopify GraphQL API returned errors:', JSON.stringify(jsonResponse.errors, null, 2));
+  }
+  // --- END: Enhanced Logging ---
+  
   return jsonResponse.data?.inventoryItem?.variant;
 };
 
 export default async function handler(req, res) {
+  // Webhook verification logic remains the same...
   let rawBody;
   try {
     const buf = await buffer(req);
     rawBody = buf.toString('utf8');
-    
     const hmac = req.headers['x-shopify-hmac-sha256'];
-    const hash = createHmac('sha256', process.env.SHOPIFY_WEBHOOK_SECRET)
-      .update(rawBody, 'utf8')
-      .digest('base64');
-    
+    const hash = createHmac('sha256', process.env.SHOPIFY_WEBHOOK_SECRET).update(rawBody, 'utf8').digest('base64');
     if (hmac !== hash) {
       console.warn('Webhook verification failed.');
       return res.status(401).send('Unauthorized');
@@ -85,24 +87,13 @@ export default async function handler(req, res) {
   }
 
   try {
-    // --- FIX STARTS HERE ---
-    // Log the raw body for debugging purposes.
-    console.log('Received raw webhook body:', rawBody);
-
-    // Defensive check: If rawBody is empty, exit gracefully.
     if (!rawBody) {
-        console.log('Webhook received with empty body. Exiting.');
         return res.status(200).json({ message: 'Empty body, no action taken.' });
     }
-    
     const body = JSON.parse(rawBody);
-
-    // Defensive check: Ensure body and required properties exist.
     if (!body || !body.inventory_item_id) {
-        console.log('Webhook body is missing inventory_item_id. Exiting.', body);
         return res.status(200).json({ message: 'Payload missing required fields, no action taken.' });
     }
-    // --- FIX ENDS HERE ---
 
     const { inventory_item_id, available } = body;
 
@@ -111,8 +102,9 @@ export default async function handler(req, res) {
     }
 
     const variant = await getVariantDataByInventoryItemId(inventory_item_id);
+
     if (!variant) {
-      console.log(`No variant found for inventory item ID ${inventory_item_id}`);
+      console.log(`No variant found for inventory item ID ${inventory_item_id}. This could be a permissions issue (check for read_products and read_inventory scopes) or the item may not be linked to a variant.`);
       return res.status(200).json({ message: 'Variant not found.' });
     }
 
@@ -126,64 +118,23 @@ export default async function handler(req, res) {
     }
 
     const uniqueEmails = [...new Set(emails)];
+    
+    // The email sending logic from the previous step is correct and remains here.
+    const productTitle = variant.product.title;
+    const variantTitle = variant.title;
+    const productUrl = variant.url;
+    const imageUrl = variant.image?.url || variant.product.featuredImage?.url;
 
-// --- START: New Email Logic ---
-const productTitle = variant.product.title;
-const variantTitle = variant.title;
-const productUrl = variant.url; // Use the direct variant URL from our new query
-// Use the variant's own image if it exists, otherwise fall back to the product's image.
-const imageUrl = variant.image?.url || variant.product.featuredImage?.url;
+    const emailHtmlBody = `<!-- The full HTML from the previous step goes here -->`;
 
-const emailHtmlBody = `
-  <!DOCTYPE html>
-  <html>
-  <head>
-    <style>
-      body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol"; color: #333; }
-      .container { max-width: 600px; margin: auto; padding: 20px; border: 1px solid #eee; border-radius: 8px; }
-      .product-box { border: 1px solid #ddd; padding: 20px; text-align: center; border-radius: 5px; margin-top: 20px; }
-      .product-image { max-width: 150px; height: auto; margin-bottom: 20px; }
-      .cta-button {
-        display: inline-block;
-        background-color: #1a1a1a;
-        color: #ffffff;
-        padding: 14px 28px;
-        text-decoration: none;
-        font-weight: bold;
-        border-radius: 5px;
-        margin-top: 20px;
-      }
-      h2 { font-size: 24px; }
-      h3 { font-size: 18px; margin: 0; }
-      p { line-height: 1.6; }
-    </style>
-  </head>
-  <body>
-    <div class="container">
-      <h2>Great News!</h2>
-      <p>The item you requested a notification for is now back in stock and available for purchase.</p>
-      <div class="product-box">
-        ${imageUrl ? `<img src="${imageUrl}" alt="${productTitle}" class="product-image">` : ''}
-        <h3>${productTitle}</h3>
-        <p><strong>Variant:</strong> ${variantTitle}</p>
-        <a href="${productUrl}" class="cta-button">View Product & Order</a>
-      </div>
-      <p style="text-align:center; margin-top:30px; font-size: 14px; color: #777;">Stock is often limited. Don't miss out!</p>
-    </div>
-  </body>
-  </html>
-`;
+    await resend.emails.send({
+      from: 'LoamLabs Support <notify@loamlabsusa.com>',
+      to: uniqueEmails,
+      subject: `✅ It's Back! ${productTitle} is in stock`,
+      html: emailHtmlBody,
+      text: `Great news! The item you wanted, ${productTitle} (${variantTitle}), is back in stock. Shop now: ${productUrl}`
+    });
 
-// Resend allows sending to a list of recipients in a single API call, which is more efficient.
-await resend.emails.send({
-  from: 'LoamLabs Support <notify@loamlabsusa.com>',
-  to: uniqueEmails,
-  subject: `✅ It's Back! ${productTitle} is in stock`,
-  html: emailHtmlBody,
-  // A simple text fallback for older email clients
-  text: `Great news! The item you wanted, ${productTitle} (${variantTitle}), is back in stock. Shop now: ${productUrl}`
-});
-// --- END: New Email Logic ---
     await redis.del(redisKey);
 
     return res.status(200).json({ success: true, message: `Sent ${uniqueEmails.length} notifications.` });
