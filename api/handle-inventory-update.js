@@ -87,12 +87,11 @@ const getVariantDataByInventoryItemId = async (inventoryItemId) => {
 async function syncSiblingInventory(triggerVariant, newQuantity, locationId) {
   const syncKey = triggerVariant.syncKey?.value;
 
-  // If no sync key, we don't do anything
   if (!syncKey) return;
 
   console.log(`Sync Logic: Key found [${syncKey}]. Trigger Variant: ${triggerVariant.id}. Target Qty: ${newQuantity}`);
 
-  // 1. Find all variants with this sync key
+  // 1. Standard Search Query
   const querySiblings = `
     query getSiblings($filter: String!) {
       productVariants(first: 20, query: $filter) {
@@ -101,9 +100,9 @@ async function syncSiblingInventory(triggerVariant, newQuantity, locationId) {
             id
             title
             inventoryQuantity
-            inventoryItem {
-              id
-            }
+            product { title } 
+            inventoryItem { id }
+            metafield(namespace: "custom", key: "inventory_sync_key") { value }
           }
         }
       }
@@ -114,11 +113,50 @@ async function syncSiblingInventory(triggerVariant, newQuantity, locationId) {
   const result = await shopifyGraphqlClient(querySiblings, { filter });
   const siblings = result.data.productVariants.edges.map(e => e.node);
 
-  // LOGGING ADDED HERE:
-  console.log(`Sync Logic: Search returned ${siblings.length} variants: [${siblings.map(s => s.title).join(', ')}]`);
+  console.log(`Sync Logic: Standard search found ${siblings.length} matches.`);
 
-  // 2. Filter out the one that triggered this (it's already correct) 
-  // AND filter out ones that are already correct (prevents infinite loops)
+  // --- DEBUG DIAGNOSTIC START ---
+  // If search failed, run a broad search to see if the API can see the data at all
+  if (siblings.length === 0) {
+    console.log("DEBUG: Standard search failed. Running Diagnostic Report...");
+    
+    // We try to find the products by searching the Title, then inspecting their metafields manually
+    // We split the title to get a safe keyword (e.g. "Sidekick")
+    const searchKeyword = triggerVariant.product.title.split(' ')[1] || "Hub"; 
+    
+    const debugQuery = `
+      query debugSearch($term: String!) {
+        productVariants(first: 20, query: $term) {
+          edges {
+            node {
+              id
+              title
+              product { title }
+              metafield(namespace: "custom", key: "inventory_sync_key") { value }
+            }
+          }
+        }
+      }
+    `;
+
+    // Search for variants with the product title in them
+    const debugResult = await shopifyGraphqlClient(debugQuery, { term: `product_type:Hub` }); 
+    // Note: If "product_type:Hub" yields nothing, try just `term: "${searchKeyword}"`
+    
+    const candidates = debugResult.data.productVariants.edges.map(e => e.node);
+    
+    console.log(`DEBUG: Diagnostic found ${candidates.length} potential candidates in store.`);
+    candidates.forEach(c => {
+        // Log the details of every hub found to see if the API sees the key
+        const keyStatus = c.metafield?.value ? `[${c.metafield.value}]` : "NULL";
+        const isMatch = c.metafield?.value === syncKey ? "MATCH!" : "No";
+        console.log(`-- Candidate: ${c.product.title} (${c.title}) | ID: ${c.id} | Key Visible: ${keyStatus} | Matches Trigger? ${isMatch}`);
+    });
+  }
+  // --- DEBUG DIAGNOSTIC END ---
+
+
+  // 2. Filter & Update (Standard Logic)
   const siblingsToUpdate = siblings.filter(v => 
     v.id !== triggerVariant.id && 
     v.inventoryQuantity !== newQuantity
@@ -129,7 +167,6 @@ async function syncSiblingInventory(triggerVariant, newQuantity, locationId) {
     return;
   }
 
-  // 3. Update the inventory for mismatching siblings
   const mutation = `
     mutation adjustInventory($input: InventoryAdjustQuantitiesInput!) {
       inventoryAdjustQuantities(input: $input) {
@@ -145,7 +182,7 @@ async function syncSiblingInventory(triggerVariant, newQuantity, locationId) {
     const delta = newQuantity - sibling.inventoryQuantity;
     
     if (!locationId) {
-        console.error("Sync Logic Error: No location_id provided in webhook, cannot adjust inventory.");
+        console.error("Sync Logic Error: No location_id provided, cannot adjust.");
         break;
     }
 
