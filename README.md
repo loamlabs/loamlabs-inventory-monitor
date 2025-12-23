@@ -12,7 +12,7 @@ This serverless application automates three critical inventory operations:
 ## Key Features
 
 ### 1. Automated Inventory Mirroring (New)
-- **Problem Solved**: Manages inventory for identical components sold under different product handles (e.g., a Hub sold as "15x110" and "20x110" that shares the same physical shell and end caps).
+- **Problem Solved**: Manages inventory for identical components sold under different product handles (e.g., a Hub sold as "15x110" and "20x110" that shares the same physical shell but include both sets of end caps).
 - **Mechanism**: Uses a `custom.inventory_sync_key` variant metafield. When one variant changes, the system instantly updates all "sibling" variants with the same key.
 - **Logic**: Uses a **"Broad Search, Strict Filter"** strategy (searching by Product Title, filtering by Metafield) to bypass Shopify's search indexing latency, ensuring immediate sync.
 
