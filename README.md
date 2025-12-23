@@ -1,106 +1,47 @@
-# LoamLabs Inventory Monitor
+## Workflows
 
-Multi-function inventory management system providing low-stock alerts, back-in-stock customer notifications, and demand tracking.
-
-## Overview
-
-This serverless application handles three critical inventory operations: automated low-stock monitoring with intelligent reporting, customer notification system for out-of-stock items, and historical order volume tracking for demand forecasting.
-
-## Key Features
-
-### 1. Low-Stock Alert System
-- **Event-Driven**: Triggered by Shopify `orders/create` and `orders/cancelled` webhooks
-- **Intelligent Reporting**: Uses Redis (Upstash) for short-term memory to send cumulative reports only when low-stock item list changes
-- **Spoke-Focused**: Monitors spoke product inventory levels across 100+ length variants
-- **Historical Tracking**: Increments/decrements `custom.historical_order_count` variant metafield for demand analytics
-
-### 2. Back-in-Stock Notification System
-- **Customer Request Collection**: API endpoint captures customer email and variant ID from product page forms
-- **Automated Notifications**: Webhook-driven system (`inventory_level/update` event) automatically emails customers when items return to stock
-- **Professional Email Design**: HTML-formatted notifications with product images, variant details, and direct purchase links
-- **One-Time Notification**: Automatically purges customer from notification list after email sent
-
-### 3. Stock Request Intelligence
-- **Real-Time Business Alerts**: Sends immediate notification to store owner when customer requests stock notification
-- **Demand Visibility**: Provides insight into which out-of-stock items customers are actively seeking
-
-## Technical Architecture
-
-### Core Technologies
-- **Runtime**: Node.js (Vercel Serverless Functions)
-- **APIs**: 
-  - Shopify Admin API (GraphQL for product/variant queries, REST for inventory)
-  - Shopify Storefront API (for public-facing variant data in notifications)
-- **Database**: Upstash Redis (customer email storage and low-stock state tracking)
-- **Email Service**: Resend
-- **Security**: HMAC signature verification for webhooks
-
-### API Endpoints
-
-```
-POST /api/log-stock-request       # Collects customer notification requests
-POST /api/notify-customers         # Triggered by inventory_level/update webhook
-POST /api/low-stock-monitor        # Triggered by orders/create and orders/cancelled webhooks
-```
+### Inventory Sync Workflow
+1. **Trigger**: Admin or Customer changes stock level of a variant (e.g., "Hub A").
+2. **Search**: System extracts the product title (e.g., "e*thirteen Sidekick") and performs a broad GraphQL search.
+3. **Filter**: System filters results to find other variants with the exact same `custom.inventory_sync_key`.
+4. **Action**: System calculates the difference and updates the sibling variants ("Hub B") to match the new quantity.
 
 ### Back-in-Stock Workflow
-
-1. **Customer Request**: User clicks "Notify Me When Available" button on product page
-2. **Data Collection**: Frontend sends email + variant ID to `/api/log-stock-request`
-3. **Storage**: Email stored in Redis list with key pattern `stock_notification_requests:{variantId}`
-4. **Owner Alert**: Immediate email sent to store owner with customer details
-5. **Inventory Update**: When item restocked, Shopify triggers `inventory_level/update` webhook
-6. **Notification**: System queries Shopify Storefront API for variant details, sends professional HTML email to all subscribed customers
-7. **Cleanup**: Redis key deleted to prevent duplicate notifications
+1. **Request**: User clicks "Notify Me" on a sold-out product. Data sent to `/api/request-notification`.
+2. **Storage**: Email stored in Redis list: `stock_notification_requests:{variantId}`.
+3. **Restock**: Inventory update triggers `/api/handle-inventory-update`.
+4. **Notification**: System detects positive stock, fetches waiting emails, sends HTML notification via Resend, and clears the Redis key.
 
 ### Low-Stock Monitoring Workflow
+1. **Order Event**: New order or cancellation triggers webhook.
+2. **Inventory Scan**: Checks all spoke products for low-stock conditions.
+3. **State Comparison**: Compares current low-stock list against previous state in Redis.
+4. **Conditional Report**: Only sends email if low-stock item list has changed.
+5. **Metafield Update**: Increments/decrements historical order count for demand forecasting.
 
-1. **Order Event**: New order or cancellation triggers webhook
-2. **Inventory Scan**: Checks all spoke products for low-stock conditions
-3. **State Comparison**: Compares current low-stock list against previous state in Redis
-4. **Conditional Report**: Only sends email if low-stock item list has changed
-5. **Metafield Update**: Increments/decrements historical order count for demand forecasting
+## Configuration
 
-## Data Storage (Redis)
-
-### Key Patterns
-- `stock_notification_requests:{variantId}` - List of customer emails awaiting restock
-- `last_low_stock_report` - JSON snapshot of previous low-stock state
-
-## Security
-
-- Webhook HMAC signature verification
-- CORS configuration for frontend API endpoints
-- Environment-based secret management
-
-## Environment Variables
-
+### Environment Variables
 Required environment variables (configured in Vercel):
 - `SHOPIFY_STORE_DOMAIN`
-- `SHOPIFY_ADMIN_ACCESS_TOKEN`
-- `SHOPIFY_STOREFRONT_ACCESS_TOKEN`
+- `SHOPIFY_ADMIN_API_TOKEN`
 - `SHOPIFY_WEBHOOK_SECRET`
 - `UPSTASH_REDIS_REST_URL`
 - `UPSTASH_REDIS_REST_TOKEN`
 - `RESEND_API_KEY`
+- `OWNER_NOTIFICATION_EMAIL` (For admin alerts)
 
-## Permissions
-
-Shopify app requires the following scopes:
-- `read_products` - For fetching variant details
-- `read_inventory` - For inventory level queries
-- `write_inventory` - For historical count metafield updates
-
-## Future Enhancements
-
-- Predictive restocking recommendations based on historical order count data
-- Customer preference for notification frequency (immediate vs. digest)
-- Integration with supplier APIs for automated reorder triggers
+### Permissions
+The Shopify App/Token requires the following access scopes:
+- `read_products`: To find siblings and fetch variant details.
+- `read_inventory`: To check current levels.
+- `write_inventory`: **Critical** - To programmatically adjust stock levels for syncing.
+- `write_products`: To update `historical_order_count` metafields.
 
 ## License
 
-MIT License - See LICENSE file for details
+MIT License - See LICENSE file for details.
 
 ---
 
-**Built for LoamLabs inventory operations and customer engagement.**
+**Built for LoamLabs inventory operations.**
