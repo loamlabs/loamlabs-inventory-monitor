@@ -8,6 +8,8 @@ export const config = {
   },
 };
 
+// --- HELPERS ---
+
 async function buffer(readable) {
   const chunks = [];
   for await (const chunk of readable) {
@@ -16,42 +18,10 @@ async function buffer(readable) {
   return Buffer.concat(chunks);
 }
 
-const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN,
-});
-
-const resend = new Resend(process.env.RESEND_API_KEY);
-
-const getVariantDataByInventoryItemId = async (inventoryItemId) => {
-  // --- START: CORRECTED GRAPHQL QUERY ---
-  // The invalid 'url' field has been removed.
-  const query = `
-    query getVariantByInventoryItem($id: ID!) {
-      inventoryItem(id: $id) {
-        variant {
-          id
-          title
-          image {
-            url(transform: {maxWidth: 200, maxHeight: 200, crop: CENTER})
-          }
-          product {
-            title
-            handle
-            onlineStoreUrl # This is the correct way to get the base product URL
-            featuredImage {
-               url(transform: {maxWidth: 200, maxHeight: 200, crop: CENTER})
-            }
-          }
-        }
-      }
-    }
-  `;
-  // --- END: CORRECTED GRAPHQL QUERY ---
-
-  const variables = { id: `gid://shopify/InventoryItem/${inventoryItemId}` };
+// Helper to run GraphQL queries/mutations
+async function shopifyGraphqlClient(query, variables) {
   const shopifyDomain = process.env.SHOPIFY_STORE_DOMAIN || 'loamlabs.myshopify.com';
-
+  
   const response = await fetch(`https://${shopifyDomain}/admin/api/2024-04/graphql.json`, {
     method: 'POST',
     headers: {
@@ -62,16 +32,146 @@ const getVariantDataByInventoryItemId = async (inventoryItemId) => {
   });
 
   const jsonResponse = await response.json();
-
   if (jsonResponse.errors) {
-    console.error('Shopify GraphQL API returned errors:', JSON.stringify(jsonResponse.errors, null, 2));
+    console.error('Shopify GraphQL Error:', JSON.stringify(jsonResponse.errors, null, 2));
+    throw new Error('GraphQL Error');
   }
+  return jsonResponse;
+}
+
+const redis = new Redis({
+  url: process.env.UPSTASH_REDIS_REST_URL,
+  token: process.env.UPSTASH_REDIS_REST_TOKEN,
+});
+
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+// --- DATA FETCHING ---
+
+const getVariantDataByInventoryItemId = async (inventoryItemId) => {
+  // UPDATED QUERY: Now fetches the 'inventory_sync_key' metafield
+  const query = `
+    query getVariantByInventoryItem($id: ID!) {
+      inventoryItem(id: $id) {
+        variant {
+          id
+          title
+          inventoryQuantity
+          syncKey: metafield(namespace: "custom", key: "inventory_sync_key") {
+            value
+          }
+          image {
+            url(transform: {maxWidth: 200, maxHeight: 200, crop: CENTER})
+          }
+          product {
+            title
+            handle
+            onlineStoreUrl
+            featuredImage {
+               url(transform: {maxWidth: 200, maxHeight: 200, crop: CENTER})
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const variables = { id: `gid://shopify/InventoryItem/${inventoryItemId}` };
+  const result = await shopifyGraphqlClient(query, variables);
   
-  return jsonResponse.data?.inventoryItem?.variant;
+  return result.data?.inventoryItem?.variant;
 };
 
+// --- SYNC LOGIC (NEW) ---
+
+async function syncSiblingInventory(triggerVariant, newQuantity, locationId) {
+  const syncKey = triggerVariant.syncKey?.value;
+
+  // If no sync key, we don't do anything
+  if (!syncKey) return;
+
+  console.log(`Sync Logic: Key found [${syncKey}]. Trigger Variant: ${triggerVariant.id}. Target Qty: ${newQuantity}`);
+
+  // 1. Find all variants with this sync key
+  const querySiblings = `
+    query getSiblings($filter: String!) {
+      productVariants(first: 20, query: $filter) {
+        edges {
+          node {
+            id
+            title
+            inventoryQuantity
+            inventoryItem {
+              id
+            }
+          }
+        }
+      }
+    }
+  `;
+
+  const filter = `metafield:custom.inventory_sync_key:'${syncKey}'`;
+  const result = await shopifyGraphqlClient(querySiblings, { filter });
+  const siblings = result.data.productVariants.edges.map(e => e.node);
+
+  // 2. Filter out the one that triggered this (it's already correct) 
+  // AND filter out ones that are already correct (prevents infinite loops)
+  const siblingsToUpdate = siblings.filter(v => 
+    v.id !== triggerVariant.id && 
+    v.inventoryQuantity !== newQuantity
+  );
+
+  if (siblingsToUpdate.length === 0) {
+    console.log('Sync Logic: All siblings are already matched.');
+    return;
+  }
+
+  // 3. Update the inventory for mismatching siblings
+  const mutation = `
+    mutation adjustInventory($input: InventoryAdjustQuantitiesInput!) {
+      inventoryAdjustQuantities(input: $input) {
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+
+  // We loop because usually there's only 1 or 2 siblings. 
+  for (const sibling of siblingsToUpdate) {
+    const delta = newQuantity - sibling.inventoryQuantity;
+    
+    // Safety check: if locationId wasn't passed by webhook, we might fail here.
+    // However, inventory_levels/update usually includes location_id.
+    if (!locationId) {
+        console.error("Sync Logic Error: No location_id provided in webhook, cannot adjust inventory.");
+        break;
+    }
+
+    const variables = {
+      input: {
+        reason: "correction",
+        name: "available",
+        changes: [
+          {
+            delta: delta,
+            inventoryItemId: sibling.inventoryItem.id,
+            locationId: `gid://shopify/Location/${locationId}`
+          }
+        ]
+      }
+    };
+
+    await shopifyGraphqlClient(mutation, variables);
+    console.log(`Sync Logic: Updated sibling ${sibling.title} (${sibling.id}) by ${delta} to match ${newQuantity}`);
+  }
+}
+
+// --- MAIN HANDLER ---
+
 export default async function handler(req, res) {
-  // Webhook verification logic remains unchanged...
+  // 1. Verification
   let rawBody;
   try {
     const buf = await buffer(req);
@@ -86,21 +186,34 @@ export default async function handler(req, res) {
   }
 
   try {
-    if (!rawBody) { return res.status(200).json({ message: 'Empty body, no action taken.' }); }
+    if (!rawBody) { return res.status(200).json({ message: 'Empty body' }); }
     const body = JSON.parse(rawBody);
-    if (!body || !body.inventory_item_id) { return res.status(200).json({ message: 'Payload missing required fields.' }); }
+    
+    // inventory_item_id and location_id are numbers in the webhook payload
+    const { inventory_item_id, location_id, available } = body;
 
-    const { inventory_item_id, available } = body;
-
-    if (!available || available <= 0) {
-      return res.status(200).json({ message: 'No action needed for out-of-stock item.' });
-    }
-
+    // We proceed even if available is 0, because we might need to sync a "Sold Out" state to siblings.
+    
+    // 2. Fetch Data
     const variant = await getVariantDataByInventoryItemId(inventory_item_id);
 
     if (!variant) {
       console.log(`No variant found for inventory item ID ${inventory_item_id}.`);
       return res.status(200).json({ message: 'Variant not found.' });
+    }
+
+    // --- LOGIC BLOCK A: INVENTORY SYNC ---
+    // We run this regardless of stock level. If it goes to 0, siblings should go to 0.
+    if (location_id) {
+        await syncSiblingInventory(variant, available, location_id);
+    } else {
+        console.warn("Webhook missing location_id, skipping sync logic.");
+    }
+
+    // --- LOGIC BLOCK B: NOTIFICATIONS (Existing) ---
+    // We only send notifications if stock is POSITIVE
+    if (!available || available <= 0) {
+      return res.status(200).json({ message: 'Synced inventory (if applicable). No notifications sent (stock <= 0).' });
     }
 
     const variantGid = variant.id;
@@ -109,16 +222,13 @@ export default async function handler(req, res) {
 
     const emails = await redis.lrange(redisKey, 0, -1);
     if (emails.length === 0) {
-      return res.status(200).json({ message: `No notification requests for variant ${variantId}.` });
+      return res.status(200).json({ message: `Synced inventory. No notifications waiting for variant ${variantId}.` });
     }
 
     const uniqueEmails = [...new Set(emails)];
-    
     const productTitle = variant.product.title;
     const variantTitle = variant.title;
-    // --- START: CORRECTED URL CONSTRUCTION ---
     const productUrl = `${variant.product.onlineStoreUrl}?variant=${variantId}`;
-    // --- END: CORRECTED URL CONSTRUCTION ---
     const imageUrl = variant.image?.url || variant.product.featuredImage?.url;
 
     const emailHtmlBody = `
@@ -158,7 +268,7 @@ export default async function handler(req, res) {
     });
 
     await redis.del(redisKey);
-    return res.status(200).json({ success: true, message: `Sent ${uniqueEmails.length} notifications.` });
+    return res.status(200).json({ success: true, message: `Synced inventory and sent ${uniqueEmails.length} notifications.` });
 
   } catch (error) {
     console.error('Error in /api/handle-inventory-update:', error);
