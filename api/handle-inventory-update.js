@@ -82,7 +82,7 @@ const getVariantDataByInventoryItemId = async (inventoryItemId) => {
   return result.data?.inventoryItem?.variant;
 };
 
-// --- SYNC LOGIC (NEW) ---
+// --- SYNC LOGIC ---
 
 async function syncSiblingInventory(triggerVariant, newQuantity, locationId) {
   const syncKey = triggerVariant.syncKey?.value;
@@ -114,6 +114,9 @@ async function syncSiblingInventory(triggerVariant, newQuantity, locationId) {
   const result = await shopifyGraphqlClient(querySiblings, { filter });
   const siblings = result.data.productVariants.edges.map(e => e.node);
 
+  // LOGGING ADDED HERE:
+  console.log(`Sync Logic: Search returned ${siblings.length} variants: [${siblings.map(s => s.title).join(', ')}]`);
+
   // 2. Filter out the one that triggered this (it's already correct) 
   // AND filter out ones that are already correct (prevents infinite loops)
   const siblingsToUpdate = siblings.filter(v => 
@@ -122,7 +125,7 @@ async function syncSiblingInventory(triggerVariant, newQuantity, locationId) {
   );
 
   if (siblingsToUpdate.length === 0) {
-    console.log('Sync Logic: All siblings are already matched.');
+    console.log('Sync Logic: All siblings are already matched (or none found).');
     return;
   }
 
@@ -138,12 +141,9 @@ async function syncSiblingInventory(triggerVariant, newQuantity, locationId) {
     }
   `;
 
-  // We loop because usually there's only 1 or 2 siblings. 
   for (const sibling of siblingsToUpdate) {
     const delta = newQuantity - sibling.inventoryQuantity;
     
-    // Safety check: if locationId wasn't passed by webhook, we might fail here.
-    // However, inventory_levels/update usually includes location_id.
     if (!locationId) {
         console.error("Sync Logic Error: No location_id provided in webhook, cannot adjust inventory.");
         break;
