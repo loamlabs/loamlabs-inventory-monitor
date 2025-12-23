@@ -49,7 +49,6 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 // --- DATA FETCHING ---
 
 const getVariantDataByInventoryItemId = async (inventoryItemId) => {
-  // UPDATED QUERY: Now fetches the 'inventory_sync_key' metafield
   const query = `
     query getVariantByInventoryItem($id: ID!) {
       inventoryItem(id: $id) {
@@ -82,19 +81,26 @@ const getVariantDataByInventoryItemId = async (inventoryItemId) => {
   return result.data?.inventoryItem?.variant;
 };
 
-// --- SYNC LOGIC ---
+// --- SYNC LOGIC (BROAD SEARCH STRATEGY) ---
 
 async function syncSiblingInventory(triggerVariant, newQuantity, locationId) {
   const syncKey = triggerVariant.syncKey?.value;
 
+  // If no sync key, we don't do anything
   if (!syncKey) return;
 
   console.log(`Sync Logic: Key found [${syncKey}]. Trigger Variant: ${triggerVariant.id}. Target Qty: ${newQuantity}`);
 
-  // 1. Standard Search Query
+  // STRATEGY: Instead of searching by Metafield (which is slow/flaky), 
+  // we search by the Product Title to find "cousins", then filter in JS.
+  
+  // 1. Construct a broad search term from the title (First 3 words)
+  // e.g. "e*thirteen Sidekick Front Hub..." -> "e*thirteen Sidekick Front"
+  const safeTitleTerms = triggerVariant.product.title.split(' ').slice(0, 3).join(' ');
+  
   const querySiblings = `
     query getSiblings($filter: String!) {
-      productVariants(first: 20, query: $filter) {
+      productVariants(first: 50, query: $filter) {
         edges {
           node {
             id
@@ -109,64 +115,29 @@ async function syncSiblingInventory(triggerVariant, newQuantity, locationId) {
     }
   `;
 
-  const filter = `metafield:custom.inventory_sync_key:'${syncKey}'`;
+  // We simply search for the title text. This is always indexed.
+  const filter = `${safeTitleTerms}`; 
   const result = await shopifyGraphqlClient(querySiblings, { filter });
-  const siblings = result.data.productVariants.edges.map(e => e.node);
+  const candidates = result.data.productVariants.edges.map(e => e.node);
 
-  console.log(`Sync Logic: Standard search found ${siblings.length} matches.`);
+  console.log(`Sync Logic: Broad title search for "${safeTitleTerms}" found ${candidates.length} candidates.`);
 
-  // --- DEBUG DIAGNOSTIC START ---
-  // If search failed, run a broad search to see if the API can see the data at all
-  if (siblings.length === 0) {
-    console.log("DEBUG: Standard search failed. Running Diagnostic Report...");
-    
-    // We try to find the products by searching the Title, then inspecting their metafields manually
-    // We split the title to get a safe keyword (e.g. "Sidekick")
-    const searchKeyword = triggerVariant.product.title.split(' ')[1] || "Hub"; 
-    
-    const debugQuery = `
-      query debugSearch($term: String!) {
-        productVariants(first: 20, query: $term) {
-          edges {
-            node {
-              id
-              title
-              product { title }
-              metafield(namespace: "custom", key: "inventory_sync_key") { value }
-            }
-          }
-        }
-      }
-    `;
-
-    // Search for variants with the product title in them
-    const debugResult = await shopifyGraphqlClient(debugQuery, { term: `product_type:Hub` }); 
-    // Note: If "product_type:Hub" yields nothing, try just `term: "${searchKeyword}"`
-    
-    const candidates = debugResult.data.productVariants.edges.map(e => e.node);
-    
-    console.log(`DEBUG: Diagnostic found ${candidates.length} potential candidates in store.`);
-    candidates.forEach(c => {
-        // Log the details of every hub found to see if the API sees the key
-        const keyStatus = c.metafield?.value ? `[${c.metafield.value}]` : "NULL";
-        const isMatch = c.metafield?.value === syncKey ? "MATCH!" : "No";
-        console.log(`-- Candidate: ${c.product.title} (${c.title}) | ID: ${c.id} | Key Visible: ${keyStatus} | Matches Trigger? ${isMatch}`);
-    });
-  }
-  // --- DEBUG DIAGNOSTIC END ---
-
-
-  // 2. Filter & Update (Standard Logic)
-  const siblingsToUpdate = siblings.filter(v => 
-    v.id !== triggerVariant.id && 
-    v.inventoryQuantity !== newQuantity
+  // 2. Strict Filter in JavaScript
+  // We only keep items that have the EXACT SAME sync key
+  const siblingsToUpdate = candidates.filter(v => 
+    v.metafield?.value === syncKey &&      // Must match key
+    v.id !== triggerVariant.id &&          // Don't update self
+    v.inventoryQuantity !== newQuantity    // Don't update if already correct
   );
 
   if (siblingsToUpdate.length === 0) {
-    console.log('Sync Logic: All siblings are already matched (or none found).');
+    console.log('Sync Logic: No siblings found needing update.');
     return;
   }
 
+  console.log(`Sync Logic: Found ${siblingsToUpdate.length} siblings to update: ${siblingsToUpdate.map(s => s.product.title).join(', ')}`);
+
+  // 3. Apply Updates
   const mutation = `
     mutation adjustInventory($input: InventoryAdjustQuantitiesInput!) {
       inventoryAdjustQuantities(input: $input) {
@@ -201,7 +172,7 @@ async function syncSiblingInventory(triggerVariant, newQuantity, locationId) {
     };
 
     await shopifyGraphqlClient(mutation, variables);
-    console.log(`Sync Logic: Updated sibling ${sibling.title} (${sibling.id}) by ${delta} to match ${newQuantity}`);
+    console.log(`Sync Logic: Updated sibling ${sibling.product.title} (${sibling.title}) by ${delta} to match ${newQuantity}`);
   }
 }
 
@@ -226,11 +197,8 @@ export default async function handler(req, res) {
     if (!rawBody) { return res.status(200).json({ message: 'Empty body' }); }
     const body = JSON.parse(rawBody);
     
-    // inventory_item_id and location_id are numbers in the webhook payload
     const { inventory_item_id, location_id, available } = body;
 
-    // We proceed even if available is 0, because we might need to sync a "Sold Out" state to siblings.
-    
     // 2. Fetch Data
     const variant = await getVariantDataByInventoryItemId(inventory_item_id);
 
@@ -240,7 +208,6 @@ export default async function handler(req, res) {
     }
 
     // --- LOGIC BLOCK A: INVENTORY SYNC ---
-    // We run this regardless of stock level. If it goes to 0, siblings should go to 0.
     if (location_id) {
         await syncSiblingInventory(variant, available, location_id);
     } else {
@@ -248,7 +215,6 @@ export default async function handler(req, res) {
     }
 
     // --- LOGIC BLOCK B: NOTIFICATIONS (Existing) ---
-    // We only send notifications if stock is POSITIVE
     if (!available || available <= 0) {
       return res.status(200).json({ message: 'Synced inventory (if applicable). No notifications sent (stock <= 0).' });
     }
