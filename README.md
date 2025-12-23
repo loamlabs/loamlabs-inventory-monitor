@@ -1,3 +1,49 @@
+# LoamLabs Inventory Monitor
+
+**Multi-function inventory management system providing real-time stock synchronization, low-stock alerts, and customer back-in-stock notifications.**
+
+## Overview
+
+This serverless application automates three critical inventory operations: 
+1. **Inventory Mirroring:** Links the stock of identical physical items sold as separate Shopify products.
+2. **Back-in-Stock Notifications:** Automatically emails customers when waitlisted items return to stock.
+3. **Low-Stock Intelligence:** Monitors spoke inventory and tracks historical demand.
+
+## Key Features
+
+### 1. Automated Inventory Mirroring (New)
+- **Problem Solved**: Manages inventory for identical components sold under different product handles (e.g., a Hub sold as "15x110" and "20x110" that shares the same physical shell and end caps).
+- **Mechanism**: Uses a `custom.inventory_sync_key` variant metafield. When one variant changes, the system instantly updates all "sibling" variants with the same key.
+- **Logic**: Uses a **"Broad Search, Strict Filter"** strategy (searching by Product Title, filtering by Metafield) to bypass Shopify's search indexing latency, ensuring immediate sync.
+
+### 2. Back-in-Stock Notification System
+- **Customer Request Collection**: API endpoint captures customer email and variant ID from product page forms.
+- **Automated Notifications**: Webhook-driven system (`inventory_levels/update`) automatically emails customers when items return to stock.
+- **Professional Email Design**: HTML-formatted notifications with product images, variant details, and direct purchase links.
+- **One-Time Notification**: Automatically purges customer from the notification list after the email is sent to prevent spam.
+
+### 3. Low-Stock Alert System
+- **Event-Driven**: Triggered by Shopify `orders/create` and `orders/cancelled` webhooks.
+- **Intelligent Reporting**: Uses Redis (Upstash) for short-term memory to send cumulative reports only when low-stock item list changes.
+- **Spoke-Focused**: Monitors spoke product inventory levels across 100+ length variants.
+- **Historical Tracking**: Increments/decrements `custom.historical_order_count` variant metafield for demand analytics.
+
+## Technical Architecture
+
+### Core Technologies
+- **Runtime**: Node.js (Vercel Serverless Functions)
+- **APIs**: 
+  - **Shopify Admin API (GraphQL)**: For searching siblings, adjusting inventory quantities, and updating metafields.
+  - **Shopify Storefront API**: For fetching public-facing variant data for emails.
+- **Database**: Upstash Redis (Customer email lists, low-stock state snapshots).
+- **Email Service**: Resend.
+- **Security**: HMAC signature verification for all incoming webhooks.
+
+### API Endpoints
+- POST /api/request-notification.js # Receives customer email + variant ID. Stores in Redis.
+- POST /api/handle-inventory-update.js # Triggered by inventory_levels/update. Handles SYNC and NOTIFY.
+- POST /api/index.js # Triggered by orders/create & cancelled. Handles LOW STOCK alerts.
+
 ## Workflows
 
 ### Inventory Sync Workflow
