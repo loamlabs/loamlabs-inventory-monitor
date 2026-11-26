@@ -4,7 +4,8 @@
   "description": "Monitors Shopify spoke inventory and sends cumulative low-stock alerts.",
   "main": "api/index.js",
   "scripts": {
-    "start": "node api/index.js"
+    "start": "node api/index.js",
+    "test": "node --experimental-default-type=module --test test/sync-siblings.test.js"
   },
   "dependencies": {
     "@shopify/shopify-api": "^9.3.2",

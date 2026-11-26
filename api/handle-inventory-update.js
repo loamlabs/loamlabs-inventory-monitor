@@ -1,6 +1,7 @@
 import { Redis } from '@upstash/redis';
 import { Resend } from 'resend';
 import { createHmac } from 'crypto';
+import { syncSiblingInventory, makeSyncGql } from '../lib/sync-siblings.js';
 
 export const config = {
   api: {
@@ -63,6 +64,7 @@ const getVariantDataByInventoryItemId = async (inventoryItemId) => {
             url(transform: {maxWidth: 200, maxHeight: 200, crop: CENTER})
           }
           product {
+            id
             title
             handle
             onlineStoreUrl
@@ -81,100 +83,7 @@ const getVariantDataByInventoryItemId = async (inventoryItemId) => {
   return result.data?.inventoryItem?.variant;
 };
 
-// --- SYNC LOGIC (BROAD SEARCH STRATEGY) ---
-
-async function syncSiblingInventory(triggerVariant, newQuantity, locationId) {
-  const syncKey = triggerVariant.syncKey?.value;
-
-  // If no sync key, we don't do anything
-  if (!syncKey) return;
-
-  console.log(`Sync Logic: Key found [${syncKey}]. Trigger Variant: ${triggerVariant.id}. Target Qty: ${newQuantity}`);
-
-  // STRATEGY: Instead of searching by Metafield (which is slow/flaky), 
-  // we search by the Product Title to find "cousins", then filter in JS.
-  
-  // 1. Construct a broad search term from the title (First 3 words)
-  // e.g. "e*thirteen Sidekick Front Hub..." -> "e*thirteen Sidekick Front"
-  const safeTitleTerms = triggerVariant.product.title.split(' ').slice(0, 3).join(' ');
-  
-  const querySiblings = `
-    query getSiblings($filter: String!) {
-      productVariants(first: 50, query: $filter) {
-        edges {
-          node {
-            id
-            title
-            inventoryQuantity
-            product { title } 
-            inventoryItem { id }
-            metafield(namespace: "custom", key: "inventory_sync_key") { value }
-          }
-        }
-      }
-    }
-  `;
-
-  // We simply search for the title text. This is always indexed.
-  const filter = `${safeTitleTerms}`; 
-  const result = await shopifyGraphqlClient(querySiblings, { filter });
-  const candidates = result.data.productVariants.edges.map(e => e.node);
-
-  console.log(`Sync Logic: Broad title search for "${safeTitleTerms}" found ${candidates.length} candidates.`);
-
-  // 2. Strict Filter in JavaScript
-  // We only keep items that have the EXACT SAME sync key
-  const siblingsToUpdate = candidates.filter(v => 
-    v.metafield?.value === syncKey &&      // Must match key
-    v.id !== triggerVariant.id &&          // Don't update self
-    v.inventoryQuantity !== newQuantity    // Don't update if already correct
-  );
-
-  if (siblingsToUpdate.length === 0) {
-    console.log('Sync Logic: No siblings found needing update.');
-    return;
-  }
-
-  console.log(`Sync Logic: Found ${siblingsToUpdate.length} siblings to update: ${siblingsToUpdate.map(s => s.product.title).join(', ')}`);
-
-  // 3. Apply Updates
-  const mutation = `
-    mutation adjustInventory($input: InventoryAdjustQuantitiesInput!) {
-      inventoryAdjustQuantities(input: $input) {
-        userErrors {
-          field
-          message
-        }
-      }
-    }
-  `;
-
-  for (const sibling of siblingsToUpdate) {
-    const delta = newQuantity - sibling.inventoryQuantity;
-    
-    if (!locationId) {
-        console.error("Sync Logic Error: No location_id provided, cannot adjust.");
-        break;
-    }
-
-    const variables = {
-      input: {
-        reason: "correction",
-        name: "available",
-        changes: [
-          {
-            delta: delta,
-            inventoryItemId: sibling.inventoryItem.id,
-            locationId: `gid://shopify/Location/${locationId}`
-          }
-        ]
-      }
-    };
-
-    await shopifyGraphqlClient(mutation, variables);
-    console.log(`Sync Logic: Updated sibling ${sibling.product.title} (${sibling.title}) by ${delta} to match ${newQuantity}`);
-  }
-}
+// --- SYNC LOGIC: see lib/sync-siblings.js ---
 
 // --- MAIN HANDLER ---
 
@@ -209,7 +118,7 @@ export default async function handler(req, res) {
 
     // --- LOGIC BLOCK A: INVENTORY SYNC ---
     if (location_id) {
-        await syncSiblingInventory(variant, available, location_id);
+        await syncSiblingInventory({ triggerVariant: variant, inventoryItemId: inventory_item_id, locationId: location_id, gql: makeSyncGql(), redis });
     } else {
         console.warn("Webhook missing location_id, skipping sync logic.");
     }
