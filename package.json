@@ -5,7 +5,7 @@
   "main": "api/index.js",
   "scripts": {
     "start": "node api/index.js",
-    "test": "node --experimental-default-type=module --test test/sync-siblings.test.js"
+    "test": "node --experimental-default-type=module --test test/sync-siblings.test.js && node --test test/historical-counts.test.js"
   },
   "dependencies": {
     "@shopify/shopify-api": "^9.3.2",

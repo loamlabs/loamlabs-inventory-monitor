@@ -4,6 +4,7 @@ require('@shopify/shopify-api/adapters/node');
 const { Redis } = require('@upstash/redis');
 const { Resend } = require('resend');
 const crypto = require('crypto');
+const historicalCounts = require('../lib/historical-counts');
 
 // --- CONFIGURATION ---
 const {
@@ -49,36 +50,15 @@ function getSession() {
     };
 }
 
+// Historical counts: batched, see lib/historical-counts.js.
+// Never throws, so a failed lookup cannot stop the order webhook (or the low-stock check that follows).
 async function updateHistoricalCounts(lineItems, direction) {
     const client = new shopify.clients.Graphql({ session: getSession() });
-    for (const item of lineItems) {
-        if (!item.variant_id || !item.sku) continue;
-        const variantId = `gid://shopify/ProductVariant/${item.variant_id}`;
-        
-        const response = await client.query({
-            data: {
-                query: `query($id: ID!) { productVariant(id: $id) {
-                    historicalOrderCount: metafield(namespace: "custom", key: "historical_order_count") { id value }
-                }}`,
-                variables: { id: variantId }
-            }
-        });
-        const metafield = response.body.data.productVariant.historicalOrderCount;
-        const currentCount = metafield ? parseInt(metafield.value, 10) : 0;
-        const newCount = direction === 'increment' ? currentCount + item.quantity : Math.max(0, currentCount - item.quantity);
-        
-        await client.query({
-            data: {
-                query: `mutation($metafields: [MetafieldsSetInput!]!) { metafieldsSet(metafields: $metafields) { metafields { key value } userErrors { field message } } }`,
-                variables: {
-                    metafields: [{
-                        ownerId: variantId, namespace: "custom", key: "historical_order_count",
-                        value: newCount.toString(), type: "number_integer"
-                    }]
-                }
-            }
-        });
-        console.log(`Updated historical count for SKU ${item.sku} from ${currentCount} to ${newCount}.`);
+    const gql = async (query, variables) => (await client.query({ data: { query, variables } })).body;
+    try {
+        return await historicalCounts.updateHistoricalCounts(lineItems, direction, { gql });
+    } catch (e) {
+        console.error('Historical counts: unexpected error, continuing:', e.message);
     }
 }
 
